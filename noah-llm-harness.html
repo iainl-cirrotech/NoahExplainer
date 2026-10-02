@@ -1,0 +1,2123 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>How the Noah LLM Harness Works — Animated</title>
+<style>
+  :root{
+    --bg:#0b0f17; --panel:#121a29; --panel2:#0e1522; --border:#243044;
+    --text:#e6edf3; --muted:#8b98ad;
+    --system:#7d8590; --user:#3fb950; --assistant:#58a6ff; --tool:#d29922;
+    --kv:#bc8cff; --accent:#39d353; --pink:#f778ba; --cyan:#39c5cf;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{
+    margin:0; background:radial-gradient(1200px 600px at 50% -10%, #16203a 0%, var(--bg) 60%);
+    color:var(--text); font:14px/1.5 ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+    display:flex; flex-direction:column; min-height:100vh;
+  }
+  header{
+    position:sticky; top:0; z-index:20; backdrop-filter:blur(10px);
+    background:rgba(11,15,23,.82); border-bottom:1px solid var(--border);
+    padding:14px 20px 12px;
+  }
+  .title-row{display:flex; align-items:baseline; gap:14px; flex-wrap:wrap; max-width:1240px; margin:0 auto}
+  h1{font-size:17px; margin:0; letter-spacing:.2px}
+  h1 span{color:var(--muted); font-weight:400}
+  .controls{margin-left:auto; display:flex; align-items:center; gap:10px}
+  button{
+    background:var(--panel); color:var(--text); border:1px solid var(--border);
+    border-radius:8px; padding:7px 12px; cursor:pointer; font:inherit; font-size:13px;
+    transition:.15s border-color,.15s background,.15s transform;
+  }
+  button:hover{border-color:#3b4a63; background:#182338}
+  button:active{transform:translateY(1px)}
+  button.primary{background:#1f6feb22; border-color:#1f6feb66; color:#cfe3ff}
+  .speed{display:flex; align-items:center; gap:6px; color:var(--muted); font-size:12px}
+  input[type=range]{width:90px; accent-color:var(--accent)}
+  .tabs{display:flex; gap:8px; margin:12px auto 0; max-width:1240px; flex-wrap:wrap}
+  .tab{
+    background:transparent; border:1px solid transparent; border-radius:8px 8px 0 0;
+    padding:8px 14px; color:var(--muted); cursor:pointer; font:inherit; font-size:13px;
+  }
+  .tab:hover{color:var(--text)}
+  .tab.active{color:var(--text); background:var(--panel); border-color:var(--border); border-bottom-color:transparent}
+  .tab b{color:var(--accent); margin-right:6px}
+
+  main{flex:1; width:100%; max-width:1240px; margin:0 auto; padding:18px 20px 8px}
+  .scene{display:none}
+  .scene.active{display:block; animation:fade .35s ease}
+  @keyframes fade{from{opacity:0; transform:translateY(6px)}to{opacity:1; transform:none}}
+  .scene-desc{
+    margin:0 0 14px; color:#cbd5e1; font-size:13.5px; line-height:1.5;
+    border-left:3px solid var(--accent); padding:2px 0 2px 12px;
+  }
+  .scene-desc b{color:#fff}
+  /* Clickable affordance: dashed outline marks elements you can click for details */
+  [data-info]{cursor:pointer; outline:1px dashed #39d3534d; outline-offset:3px}
+  [data-info]:hover{outline:1.5px solid var(--accent); outline-offset:3px}
+
+  .stage{
+    position:relative; border:1px solid var(--border); border-radius:16px;
+    background:linear-gradient(180deg,#101828, #0c1220); padding:22px; min-height:440px;
+    overflow:hidden;
+  }
+  .packet-layer{position:absolute; inset:0; pointer-events:none; z-index:15}
+  .packet{
+    position:absolute; padding:5px 10px; border-radius:999px; font-size:11.5px; font-weight:600;
+    white-space:nowrap; border:1px solid; box-shadow:0 6px 18px rgba(0,0,0,.45);
+    will-change:transform;
+  }
+  .packet.req{background:#1f6feb; border-color:#79b8ff; color:#fff}
+  .packet.res{background:#3fb950; border-color:#8ff0a4; color:#04220c}
+  .packet.tc{background:#d29922; border-color:#f5d98a; color:#241a00}
+  .packet.txt{background:#0d2a4d; border-color:#58a6ff; color:#d6e9ff}
+
+  .node{
+    background:var(--panel); border:1px solid var(--border); border-radius:12px;
+    padding:12px; box-shadow:0 8px 24px rgba(0,0,0,.25); transition:.3s opacity,.3s transform,.3s border-color;
+  }
+  .node-head{display:flex; align-items:center; gap:8px; font-weight:600; font-size:13px; margin-bottom:10px}
+  .node-head .sub{color:var(--muted); font-weight:400; font-size:11.5px}
+  .dot{width:9px;height:9px;border-radius:50%; display:inline-block; flex:0 0 auto}
+  .dot.user{background:var(--user)} .dot.assistant{background:var(--assistant)}
+  .dot.tool{background:var(--tool)} .dot.accent{background:var(--accent)}
+  .dot.kv{background:var(--kv)} .dot.system{background:var(--system)}
+  .dot.pink{background:var(--pink)}
+
+  .hidden{opacity:0; visibility:hidden; transform:translateY(6px)}
+  .visible{opacity:1; visibility:visible; transform:none}
+  .glow{border-color:var(--accent) !important; box-shadow:0 0 0 3px #39d35333, 0 0 26px #39d35333}
+  .pulse{animation:pulse .7s ease}
+  @keyframes pulse{0%{box-shadow:0 0 0 0 #39d35366}70%{box-shadow:0 0 0 12px #39d35300}100%{box-shadow:0 0 0 0 #39d35300}}
+
+  /* ---------- Scene 1 ---------- */
+  .loop-row{display:grid; grid-template-columns: 220px 1fr 260px; gap:26px; align-items:start; position:relative}
+  .bubble{border:1px solid var(--border); border-radius:10px; padding:9px 11px; font-size:12.5px; background:var(--panel2)}
+  .bubble.user{border-left:3px solid var(--user)}
+  .harness-node{position:relative}
+  .ctx{display:grid; gap:6px; margin-bottom:12px}
+  .ctx-layer{
+    border:1px solid var(--border); border-left:3px solid var(--system); background:var(--panel2);
+    border-radius:7px; padding:6px 9px; font-size:11.5px; color:var(--muted);
+    display:flex; align-items:center; justify-content:space-between; gap:8px;
+    cursor:pointer; transition:.18s border-color,.18s background,.18s color;
+  }
+  .ctx-layer:hover{border-color:var(--accent); color:var(--text); background:#14203a}
+  .ctx-layer .info, .history .info{opacity:.45; font-size:11px; transition:.18s opacity}
+  .ctx-layer:hover .info{opacity:1; color:var(--accent)}
+  .history{cursor:pointer; transition:.18s border-color}
+  .history:hover{border-color:var(--accent)}
+  .history:hover .info{opacity:1; color:var(--accent)}
+  .history{border:1px dashed #2f3b52; border-radius:9px; padding:9px; background:#0b1220}
+  .history-head{font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.6px; margin-bottom:7px}
+  .history-list{display:grid; gap:6px; min-height:34px}
+  .h-block{border-radius:6px; padding:5px 8px; font-size:11.5px; border:1px solid var(--border)}
+  .h-block.user{border-left:3px solid var(--user); background:#0f2417}
+  .h-block.assistant{border-left:3px solid var(--assistant); background:#0e2036}
+  .h-block.tool{border-left:3px solid var(--tool); background:#2a2007}
+  .tools-node{margin-top:12px}
+  .tool-chips{display:flex; flex-wrap:wrap; gap:6px}
+  .tool-chips span{font-size:11px; border:1px solid var(--border); border-radius:6px; padding:3px 7px; color:var(--muted); background:var(--panel2)}
+  .tool-chips span.hot{border-color:var(--tool); color:#ffd98a; background:#2a2007}
+  .stream{display:grid; gap:6px; min-height:60px}
+  .stream .tok{font-size:12px; border:1px solid var(--border); border-radius:6px; padding:5px 8px; background:var(--panel2); border-left:3px solid var(--assistant)}
+  .stream .tok.tool{border-left-color:var(--tool); background:#241b06}
+
+  /* ---------- Scene 2 ---------- */
+  .prompt-row{display:grid; grid-template-columns:repeat(3,1fr); gap:20px; align-items:start}
+  .prompt-card{background:var(--panel); border:1px solid var(--border); border-radius:12px; padding:12px; transition:.3s border-color,.3s box-shadow}
+  .prompt-card.src{border-color:var(--cyan); box-shadow:0 0 0 3px #39c5cf22}
+  .card-head{font-size:12px; color:var(--muted); text-transform:uppercase; letter-spacing:.7px; margin-bottom:10px}
+  .blocks{display:grid; gap:7px; min-height:180px; align-content:start}
+  .blk{border:1px solid var(--border); border-left:4px solid var(--system); border-radius:7px; padding:7px 9px; font-size:11.5px; background:var(--panel2);
+       opacity:0; transform:translateY(6px); transition:.3s opacity,.3s transform}
+  .blk.show{opacity:1; transform:none}
+  .blk.t-user{border-left-color:var(--user)} .blk.t-assistant{border-left-color:var(--assistant)}
+  .blk.t-tool{border-left-color:var(--tool)} .blk.t-system{border-left-color:var(--system)}
+  .blk.new{border-color:var(--pink); box-shadow:0 0 0 3px #f778ba22; background:#26102a}
+  .blk.copied{animation:copied .7s ease}
+  @keyframes copied{0%{background:#0d3a4d}100%{background:var(--panel2)}}
+  .banner{margin-top:16px; border:1px solid #1f6feb66; background:#12233d; color:#bcd8ff; border-radius:10px; padding:10px 14px; font-size:12.5px; opacity:0; transition:.4s opacity}
+  .banner.show{opacity:1}
+
+  /* ---------- Scene 3 ---------- */
+  .io-strip{display:flex; align-items:center; gap:14px; margin-bottom:18px}
+  .io-box{flex:1; border:1px solid var(--border); border-radius:10px; padding:10px 12px; background:var(--panel2)}
+  .io-box.in{border-left:3px solid var(--user)}
+  .io-box.out{border-left:3px solid var(--assistant)}
+  .io-label{font-size:10.5px; text-transform:uppercase; letter-spacing:.7px; color:var(--muted); margin-bottom:5px}
+  .io-text{font-size:14px; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; color:#e6edf3; min-height:20px}
+  .io-box.out .io-text{color:#bcd8ff}
+  .io-arrow{color:var(--muted); font-size:18px}
+  .io-gpu{display:flex; align-items:center; gap:6px; font-size:12px; font-weight:600; color:var(--muted);
+          border:1px dashed var(--border); border-radius:999px; padding:6px 12px; white-space:nowrap}
+  .io-box.out .cursor{color:var(--accent); animation:blink 1s steps(1) infinite}
+  @keyframes blink{50%{opacity:0}}
+  .gpu-row{display:grid; grid-template-columns: 200px 1fr 300px; gap:22px; align-items:start}
+  .seq-list{display:grid; gap:6px}
+  .chip{border:1px solid var(--border); border-radius:7px; padding:6px 9px; font-size:11.5px; background:var(--panel2); transition:.25s all}
+  .chip.prompt{border-left:3px solid var(--system)}
+  .chip.gen{border-left:3px solid var(--assistant)}
+  .chip.feed{border-color:var(--accent); box-shadow:0 0 0 3px #39d35333; background:#0f2417}
+  .chip.dim{opacity:.35}
+  .pipe{display:flex; align-items:center; justify-content:center; gap:8px; flex-wrap:wrap; padding:26px 6px}
+  .pipe-stage{border:1px solid var(--border); border-radius:9px; padding:12px 12px; font-size:12px; background:var(--panel2); min-width:86px; text-align:center; transition:.25s all; cursor:pointer}
+  .pipe-stage:hover{border-color:var(--accent); color:var(--text); transform:translateY(-3px)}
+  .pipe-stage.on{border-color:var(--accent); color:#bff7cb; box-shadow:0 0 0 3px #39d35333; transform:translateY(-3px)}
+  .pipe-arrow{color:var(--muted)}
+  .vram-node{display:grid; gap:9px}
+  .vram-block{border:1px solid var(--border); border-radius:8px; padding:8px 10px; font-size:11.5px; background:var(--panel2); color:var(--muted)}
+  .vram-block b{color:var(--text); font-weight:600}
+  .vram-block.weights{border-left:3px solid var(--system)}
+  .vram-block.kv{border-left:3px solid var(--kv)}
+  .vram-block.act{border-left:3px solid var(--tool)}
+  .vram-block.logits{border-left:3px solid var(--assistant)}
+  .vram-block.live{border-color:var(--accent); box-shadow:0 0 0 3px #39d35322}
+  .kv-grid{display:grid; grid-template-columns:repeat(4,1fr); gap:4px; margin-top:8px}
+  .kv-cell{height:14px; border-radius:4px; background:#1b2436; border:1px solid #26324a; transition:.2s all}
+  .kv-cell.lit{background:var(--kv); border-color:#d7bcff; box-shadow:0 0 8px #bc8cff88}
+  .kv-cell.read{background:#e6d3ff; border-color:#fff}
+
+  /* ---------- Scene 4: Business Central ---------- */
+  .bc-row{display:grid; grid-template-columns:1.15fr .95fr .95fr; gap:20px; align-items:start}
+  .skill-chip{
+    border:1px solid #39d35366; background:#0f2417; color:#bff7cb; border-radius:999px;
+    padding:5px 11px; font-size:11.5px; display:inline-flex; align-items:center; gap:7px; margin-bottom:10px;
+  }
+  .chat{display:grid; gap:8px; align-content:start; max-height:560px; overflow-y:auto; scrollbar-width:thin}
+  .msg{border:1px solid var(--border); border-radius:9px; padding:8px 10px; font-size:12px; background:var(--panel2);
+       opacity:0; transform:translateY(6px); transition:.3s opacity,.3s transform}
+  .msg.show{opacity:1; transform:none}
+  .msg.user{border-left:3px solid var(--user)}
+  .msg.agent{border-left:3px solid var(--assistant)}
+  .msg.q{border-left:3px solid var(--pink); color:var(--muted); font-size:11.5px}
+  .msg.tool{border-left:3px solid var(--tool); font-family:ui-monospace,monospace; font-size:11px; color:#ffd98a; background:#241b06}
+  .msg.ok{border-left:3px solid var(--accent); color:#bff7cb; background:#0f2417}
+  .msg .who{color:var(--muted); font-size:10.5px; text-transform:uppercase; letter-spacing:.6px; display:block; margin-bottom:3px}
+
+  .tree{display:grid; gap:3px; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12px}
+  .tree .item{display:flex; align-items:center; gap:7px; padding:3px 7px; border-radius:6px; color:#cbd5e1;
+              opacity:0; transform:translateX(-8px); transition:.3s opacity,.3s transform,.3s background}
+  .tree .item.show{opacity:1; transform:none}
+  .tree .item.dir{color:var(--muted)}
+  .tree .item .ico{width:14px; text-align:center; opacity:.85}
+  .tree .item.newfile{background:#1a1030; border:1px solid #f778ba55}
+  .tree .item.touched{background:#0f2417; border:1px solid #39d35355}
+  .tree .indent1{padding-left:20px} .tree .indent2{padding-left:38px}
+
+  .flow{display:grid; gap:7px}
+  .stage-item{display:flex; align-items:center; gap:9px; font-size:12px; color:var(--muted);
+              padding:6px 9px; border:1px solid var(--border); border-radius:8px; background:var(--panel2); transition:.25s all}
+  .stage-item .marker{width:16px; height:16px; border-radius:50%; border:1.5px solid var(--border);
+              display:flex; align-items:center; justify-content:center; font-size:10px; flex:0 0 auto}
+  .stage-item.active{border-color:var(--accent); color:var(--text); box-shadow:0 0 0 3px #39d35322}
+  .stage-item.active .marker{border-color:var(--accent); background:var(--accent); color:#04220c}
+  .stage-item.done{color:#bff7cb}
+  .stage-item.done .marker{border-color:var(--accent); background:#39d35333; color:var(--accent)}
+
+  /* ---------- Scene 5: tool catalog ---------- */
+  .stack-head{display:flex; align-items:center; gap:9px; font-weight:600; font-size:14px; margin-bottom:14px}
+  .stack-head .sub{color:var(--muted); font-weight:400; font-size:12px}
+  .stack{display:flex; flex-direction:column; gap:7px; max-height:560px; overflow-y:auto;
+         padding:6px 12px 6px 4px; scrollbar-width:thin}
+  .stack-grp{font-size:10.5px; text-transform:uppercase; letter-spacing:.8px; color:var(--muted);
+             margin:12px 0 3px; padding-left:4px}
+  .stack-grp:first-child{margin-top:0}
+  .tool-card{
+    display:grid; grid-template-columns:210px 1fr 18px; gap:12px; align-items:center;
+    border:1px solid var(--border); border-left:4px solid var(--system); border-radius:9px;
+    background:var(--panel2); padding:9px 13px; cursor:pointer;
+    transition:transform .28s cubic-bezier(.4,0,.2,1), box-shadow .28s, border-color .28s, background .28s;
+  }
+  .tool-card{outline:1px dashed #39d3534d; outline-offset:3px}
+  .tool-card:hover{border-color:var(--accent); transform:translateX(4px); outline:1.5px solid var(--accent); outline-offset:3px}
+  .tool-card .tc-name{font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12.5px; font-weight:600; color:#e6edf3}
+  .tool-card .tc-desc{font-size:11.5px; color:var(--muted)}
+  .tool-card .tc-go{color:var(--muted); font-size:12px; text-align:right; transition:color .28s}
+  .tool-card.g-core{border-left-color:var(--system)}
+  .tool-card.g-host{border-left-color:var(--assistant)}
+  .tool-card.g-bc{border-left-color:var(--tool)}
+  .tool-card.popped{
+    transform:translateX(16px) scale(1.015);
+    border-color:var(--accent); background:#14203a;
+    box-shadow:-8px 10px 30px rgba(0,0,0,.5), 0 0 0 3px #39d35322;
+  }
+  .tool-card.popped .tc-go{color:var(--accent)}
+  @media (max-width:760px){ .tool-card{grid-template-columns:1fr 18px} .tool-card .tc-desc{display:none} }
+
+  /* ---------- Intro ---------- */
+  .intro-hero{text-align:center; margin:4px 0 22px}
+  .intro-kicker{font-size:11px; text-transform:uppercase; letter-spacing:1.5px; color:var(--accent)}
+  .intro-title{font-size:42px; margin:6px 0 8px; letter-spacing:-.5px}
+  .intro-sub{max-width:780px; margin:0 auto; color:#cbd5e1; font-size:14px}
+  .intro-grid{display:grid; grid-template-columns:1fr 1fr; gap:18px}
+  .intro-card{padding:14px 16px}
+  .intro-list{margin:0; padding-left:18px; display:grid; gap:8px; color:#cbd5e1; font-size:12.5px}
+  .intro-list li::marker{color:var(--accent)}
+  .intro-list b{color:#ffc9e2; font-weight:600}
+  .intro-list code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:11.5px; color:#ffd98a; background:#241b06; padding:1px 5px; border-radius:4px}
+  .intro-note{margin-top:18px; text-align:center; color:var(--muted); font-size:12.5px; border:1px dashed var(--border); border-radius:10px; padding:12px}
+  @media (max-width:980px){ .intro-grid{grid-template-columns:1fr} }
+
+  /* ---------- Scene 0: plain chat ---------- */
+  .chat-grid{display:grid; grid-template-columns:1fr 1fr; gap:22px; align-items:start}
+  .code-view{background:#0a0f19; border:1px solid var(--border); border-radius:9px; padding:12px 14px;
+             font-size:11.5px; line-height:1.55; color:#cbd5e1; white-space:pre; overflow:auto; max-height:220px; margin:0;
+             font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+  .filelist{display:grid; gap:4px; margin-bottom:10px}
+  .fitem{display:flex; align-items:center; justify-content:space-between; gap:8px; font-size:11.5px; padding:5px 9px;
+         border:1px solid var(--border); border-radius:6px; background:var(--panel2); color:#cbd5e1;
+         font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+         opacity:0; transform:translateX(-8px); transition:.3s opacity,.3s transform,.3s border-color,.3s background}
+  .fitem.show{opacity:1; transform:none}
+  .fitem .tag{font-family:ui-sans-serif,system-ui,sans-serif; font-size:10px; color:var(--muted)}
+  .fitem.active{border-color:var(--user); background:#0f2417}
+  .fitem.active .tag{color:#8ff0a4}
+  .fitem.unseen{border-style:dashed}
+  .fitem.unseen .tag{color:var(--pink)}
+  .fitem.unseen.lit{border-color:var(--pink); background:#2a0f1f; opacity:1}
+  .msg.warn{border-left:3px solid var(--pink); background:#2a0f1f; color:#ffc9e2}
+  .chatwin{display:grid; gap:8px; max-height:320px; overflow-y:auto; scrollbar-width:thin; padding-right:4px}
+  .msg pre.paste{background:#0a0f19; border:1px solid var(--border); border-radius:6px; padding:7px 9px; margin:7px 0 0;
+                 font-size:10.5px; line-height:1.45; white-space:pre; overflow:auto;
+                 font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+  .friction{display:flex; gap:12px; flex-wrap:wrap; margin-top:18px}
+  .friction .fr{border:1px solid var(--border); border-radius:8px; padding:8px 12px; font-size:12px; background:var(--panel2); color:var(--muted)}
+  .friction .fr span{color:var(--pink); font-weight:700; font-size:15px; margin-right:5px}
+  .friction .fr.bad{border-color:#d2992255; color:#ffd98a}
+  .chat-banner{margin-top:16px; border:1px solid #f778ba66; background:#2a0f1f; color:#ffc9e2; border-radius:10px;
+               padding:11px 14px; font-size:13px; opacity:0; transition:.4s opacity}
+  .chat-banner.show{opacity:1}
+  #c-chatnode.forgotten{opacity:.25; filter:grayscale(.7); transition:.6s opacity,.6s filter}
+
+  /* ---------- Info modal ---------- */
+  .modal-backdrop{
+    position:fixed; inset:0; z-index:100; display:none; align-items:center; justify-content:center; padding:24px;
+    background:rgba(4,7,12,.72); backdrop-filter:blur(3px);
+  }
+  .modal-backdrop.open{display:flex; animation:fade .2s ease}
+  .modal{
+    width:min(780px,100%); max-height:84vh; overflow:auto; background:var(--panel);
+    border:1px solid var(--border); border-radius:14px; padding:20px 22px;
+    box-shadow:0 30px 80px rgba(0,0,0,.65);
+  }
+  .modal-head{display:flex; justify-content:space-between; align-items:flex-start; gap:12px; margin-bottom:4px}
+  .modal-kicker{font-size:10.5px; text-transform:uppercase; letter-spacing:.8px; color:var(--muted)}
+  .modal h2{margin:3px 0 0; font-size:18px}
+  .modal-close{
+    background:transparent; border:1px solid var(--border); border-radius:8px; color:var(--muted);
+    cursor:pointer; width:30px; height:30px; font-size:13px; flex:0 0 auto;
+  }
+  .modal-close:hover{color:var(--text); border-color:#3b4a63}
+  .modal-explain{font-size:13px; color:#cbd5e1; margin:10px 0}
+  .modal-src{font-size:11.5px; color:var(--muted); margin-bottom:12px; font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+  .modal-code{
+    background:#0a0f19; border:1px solid var(--border); border-radius:10px; padding:12px 14px;
+    font-size:11.5px; line-height:1.55; color:#cbd5e1; white-space:pre-wrap; overflow-x:auto; margin:0;
+    font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+  }
+  .modal-hint{font-size:11.5px; color:var(--muted); margin:16px 0 8px; text-transform:uppercase; letter-spacing:.6px}
+  .skill-acc{border:1px solid var(--border); border-radius:9px; margin-bottom:7px; overflow:hidden; background:var(--panel2)}
+  .skill-acc.open{border-color:#39d35366}
+  .skill-head{
+    width:100%; display:flex; align-items:center; gap:10px; background:transparent; border:0;
+    padding:9px 12px; cursor:pointer; color:var(--text); font:inherit; font-size:12.5px; text-align:left;
+  }
+  .skill-head:hover{background:#16203a}
+  .skill-head .skill-name{font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-weight:600}
+  .skill-head .skill-tag{margin-left:auto; font-size:10.5px; color:var(--muted)}
+  .skill-head .chev{color:var(--accent); transition:transform .25s ease; font-size:11px}
+  .skill-acc.open .skill-head .chev{transform:rotate(90deg)}
+  .skill-body{max-height:0; overflow:hidden; transition:max-height .35s ease, opacity .3s ease; opacity:0}
+  .skill-acc.open .skill-body{max-height:520px; opacity:1}
+  .skill-inner{padding:2px 12px 12px; border-top:1px solid var(--border)}
+  .skill-desc{font-size:12px; color:#cbd5e1; margin:9px 0}
+  .skill-when{font-size:11.5px; color:var(--muted); margin-bottom:9px}
+  .skill-when b{color:var(--tool)}
+  .skill-ex{
+    background:#0a0f19; border:1px solid var(--border); border-radius:8px; padding:10px 12px; margin:0;
+    font-size:11px; line-height:1.5; color:#cbd5e1; white-space:pre-wrap; overflow-x:auto;
+    font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+  }
+
+  /* ---------- Scene 6: VS Code bridge ---------- */
+  .vsc-row{display:grid; grid-template-columns:1fr 196px 1.2fr; gap:16px; align-items:start}
+  .vsc-chat{display:grid; gap:7px; max-height:520px; overflow-y:auto; scrollbar-width:thin; padding-right:4px}
+  .bridge-items{display:grid; gap:6px}
+  .bridge-chip{font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:10px; line-height:1.3;
+               border:1px solid var(--border); border-radius:6px; padding:5px 7px; background:var(--panel2);
+               color:var(--muted); opacity:.35; transition:.3s all; word-break:break-word}
+  .bridge-chip.on{opacity:1; border-color:var(--accent); color:#bff7cb; background:#0f2417}
+  .diff{display:grid; grid-template-columns:1fr 1fr; border:1px solid var(--border); border-radius:9px; overflow:hidden}
+  .diff-col{border-right:1px solid var(--border)}
+  .diff-col:last-child{border-right:0}
+  .diff-label{font-size:9.5px; text-transform:uppercase; letter-spacing:.6px; color:var(--muted);
+              padding:5px 8px; background:#0e1522; border-bottom:1px solid var(--border)}
+  .diff-col pre{margin:0; padding:9px 10px; font-size:10.5px; line-height:1.5; white-space:pre;
+                color:#cbd5e1; min-height:150px; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; overflow:auto}
+  .diff-col.before pre{background:#160e12}
+  .diff-col.after pre{background:#0e1a12}
+  .diff-actions{display:flex; gap:8px; margin-top:10px}
+  .diff-actions button{font-size:12px; padding:7px 12px}
+  .diff-actions .accept{border-color:#39d35366; color:#bff7cb}
+  .diff-actions .reject{border-color:#f778ba66; color:#ffc9e2}
+  .diff-actions .accept.pressed{background:#0f2417; border-color:var(--accent); box-shadow:0 0 0 3px #39d35333}
+  .diff-actions .reject.pressed{background:#2a0f1f; border-color:var(--pink); box-shadow:0 0 0 3px #f778ba33}
+  .preview{margin-top:12px; border:1px solid var(--border); border-radius:9px; overflow:hidden}
+  .preview-head{font-size:9.5px; text-transform:uppercase; letter-spacing:.6px; color:var(--muted);
+                padding:5px 8px; background:#0e1522; border-bottom:1px solid var(--border)}
+  .mermaid-mock{display:flex; align-items:center; gap:9px; justify-content:center; padding:16px 10px; background:#0a0f19; flex-wrap:wrap}
+  .mm-node{border:1px solid var(--accent); border-radius:6px; padding:6px 11px; color:#bff7cb; font-size:11px; background:#0f2417}
+  .mm-arrow{color:var(--muted)}
+  .sync-line{margin-top:10px; font-size:11.5px; color:#bff7cb; border:1px solid #39d35355; background:#0f2417;
+             border-radius:8px; padding:7px 10px}
+  .test-item{margin-top:10px; font-size:11.5px; color:#cbd5e1; border:1px solid var(--border); background:var(--panel2);
+             border-radius:8px; padding:8px 10px; display:flex; align-items:center; gap:8px}
+  .test-item .ti-ico{color:var(--accent); font-weight:700}
+  .test-item .ti-sub{color:var(--muted); margin-left:auto; font-size:10.5px}
+  @media (max-width:980px){ .vsc-row{grid-template-columns:1fr} }
+
+  /* ---------- Scene 7: TUI anatomy ---------- */
+  .tui-row{display:grid; grid-template-columns:1fr; gap:18px; align-items:start; transition:grid-template-columns .5s ease}
+  .tui-row.split{grid-template-columns:1fr 380px}
+  .tui-window{position:relative}
+  .tui-window,.vsc-win{background:#0a0e15; border:1px solid var(--border); border-radius:12px; overflow:hidden;
+                       box-shadow:0 20px 60px rgba(0,0,0,.5)}
+  .vsc-win{display:none}
+  .vsc-win.show{display:block; animation:fade .5s ease}
+  .tui-titlebar,.vsc-titlebar{display:flex; align-items:center; gap:6px; padding:8px 12px; background:#0e1522; border-bottom:1px solid var(--border)}
+  .tb-dot{width:10px; height:10px; border-radius:50%}
+  .tb-dot.r{background:#ff5f57} .tb-dot.y{background:#febc2e} .tb-dot.g{background:#28c840}
+  .tb-title{margin-left:8px; font-size:11px; color:var(--muted); font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+  .tui-header{padding:10px 14px; border-bottom:1px solid var(--border); background:#0c1220; cursor:pointer; transition:.2s background}
+  .tui-header:hover,.tui-header.hl{background:#14203a}
+  .th-line{display:flex; align-items:center; gap:8px; font-size:11.5px; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; color:#cbd5e1; padding:2px 0}
+  .th-right{margin-left:auto; color:var(--muted)}
+  .th-model{color:var(--cyan)} .th-cwd{color:var(--cyan)}
+  .th-glyph{color:var(--muted)} .th-glyph.on{color:var(--accent)}
+  .mascot{color:var(--accent)}
+  .tui-body{display:grid; grid-template-columns:1fr 190px; min-height:230px}
+  .tui-transcript{padding:11px 14px; display:grid; gap:6px; align-content:start; max-height:300px; overflow-y:auto;
+                  font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:11.5px; scrollbar-width:thin}
+  .tui-transcript.hl{background:#101a2c}
+  .tline{opacity:0; transform:translateY(4px); transition:.3s opacity,.3s transform}
+  .tline.show{opacity:1; transform:none}
+  .tline .who{color:var(--muted); font-size:10px; text-transform:uppercase; letter-spacing:.5px; margin-right:6px}
+  .tline.user{color:#8ff0a4} .tline.reason{color:var(--muted); font-style:italic}
+  .tline.agent{color:#bcd8ff} .tline.tool{color:#ffd98a} .tline.result{color:#9fe6ff} .tline.ok{color:#bff7cb}
+  .tui-plan{border-left:1px solid var(--border); padding:10px 10px; background:#0b1220; cursor:pointer; transition:.2s background}
+  .tui-plan:hover,.tui-plan.hl{background:#14203a}
+  .plan-head{font-size:10px; text-transform:uppercase; letter-spacing:.6px; color:var(--muted); margin-bottom:8px}
+  .plan-list{display:grid; gap:5px}
+  .plan-item{font-size:10.5px; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; color:var(--muted);
+             padding:4px 6px; border-radius:6px; opacity:0; transform:translateX(-4px); transition:.3s all; display:flex; gap:6px}
+  .plan-item.show{opacity:1; transform:none}
+  .plan-item.done{color:#bff7cb}
+  .plan-item.active{background:#0f2417; color:#bff7cb; border:1px solid #39d35355}
+  .tui-input{display:flex; align-items:center; gap:4px; padding:11px 14px; border-top:1px solid var(--border);
+             background:#0c1220; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12.5px; cursor:pointer; transition:.2s background}
+  .tui-input:hover,.tui-input.hl{background:#14203a}
+  .tui-prompt{color:var(--accent); margin-right:4px}
+  .tui-typed{color:#e6edf3}
+  .tui-placeholder{color:var(--muted)}
+  .tui-cursor{color:var(--accent); animation:blink 1s steps(1) infinite}
+  .slash-menu{position:absolute; left:14px; bottom:86px; background:#0e1626; border:1px solid var(--border); border-radius:8px;
+              box-shadow:0 14px 40px rgba(0,0,0,.55); padding:5px; display:none; z-index:8}
+  .slash-menu.show{display:block}
+  .slash-item{font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:11.5px; color:#cbd5e1; padding:4px 10px; border-radius:6px}
+  .slash-item.sel{background:#0f2417; color:#bff7cb}
+  .tui-footer{display:flex; align-items:center; gap:10px; padding:8px 14px; border-top:1px solid var(--border);
+              background:#0e1522; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:11px; cursor:pointer; transition:.2s background}
+  .tui-footer:hover,.tui-footer.hl{background:#14203a}
+  .tf-status{color:#bff7cb; white-space:nowrap}
+  .tf-keys{margin-left:auto; color:var(--muted); white-space:nowrap}
+  .vsc-badge{padding:9px 14px; font-size:11.5px; color:var(--muted); border-bottom:1px solid var(--border); font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+  .vsc-badge.on{color:#bff7cb}
+  .vsc-side{padding:10px 12px; display:grid; gap:5px}
+  .vsc-file{font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:11px; color:#cbd5e1;
+            border:1px solid var(--border); border-radius:6px; padding:5px 8px; background:var(--panel2);
+            opacity:0; transform:translateX(-6px); transition:.3s all}
+  .vsc-file.show{opacity:1; transform:none}
+  @media (max-width:980px){ .tui-row.split{grid-template-columns:1fr} .tui-body{grid-template-columns:1fr} }
+
+  footer{border-top:1px solid var(--border); background:rgba(11,15,23,.9); padding:12px 20px}
+  .caption{max-width:1240px; margin:0 auto; display:flex; gap:12px; align-items:center; min-height:22px}
+  .caption .badge{background:var(--accent); color:#04220c; font-weight:700; font-size:11px; border-radius:6px; padding:3px 8px; flex:0 0 auto}
+  .caption .text{font-size:13px; color:#cbd5e1}
+  .legend{max-width:1240px; margin:10px auto 0; display:flex; gap:14px; flex-wrap:wrap; color:var(--muted); font-size:11.5px}
+  .legend i{width:9px;height:9px;border-radius:50%; display:inline-block; margin-right:5px; vertical-align:middle}
+  .legend .click-legend{color:var(--accent)}
+  .legend .tagline{margin-left:auto; color:#cbd5e1}
+  .legend .tagline b{color:var(--accent); letter-spacing:.6px; margin-right:2px}
+  @media (max-width:980px){
+    .loop-row,.gpu-row,.chat-grid{grid-template-columns:1fr}
+    .prompt-row{grid-template-columns:1fr}
+  }
+</style>
+</head>
+<body>
+<header>
+  <div class="title-row">
+    <h1>How the Noah LLM Harness Works</h1>
+    <div class="controls">
+      <button id="playpause" class="primary">Pause</button>
+      <button id="restart">Restart</button>
+      <div class="speed">Speed <input type="range" id="speed" min="0.5" max="3" step="0.25" value="0.5"><span id="speedval">0.5×</span></div>
+    </div>
+  </div>
+  <div class="tabs">
+    <button class="tab active" data-scene="intro">Introduction</button>
+    <button class="tab" data-scene="chat"><b>0</b>Just a chat</button>
+    <button class="tab" data-scene="loop"><b>1</b>Harness loop</button>
+    <button class="tab" data-scene="prompt"><b>2</b>Prompt growth</button>
+    <button class="tab" data-scene="gpu"><b>3</b>GPU generation</button>
+    <button class="tab" data-scene="bc"><b>4</b>Business Central build</button>
+    <button class="tab" data-scene="tools"><b>5</b>Tool catalog</button>
+    <button class="tab" data-scene="vscode"><b>6</b>VS Code bridge</button>
+    <button class="tab" data-scene="tui"><b>7</b>TUI anatomy</button>
+  </div>
+</header>
+
+<main>
+  <!-- ============ INTRO ============ -->
+  <section class="scene active" id="scene-intro">
+    <p class="scene-desc">An introduction to <b>Noah</b>: what it is, why it exists, the problems it solves, and the Business Central tooling it ships.</p>
+    <div class="stage" id="stage-intro">
+      <div class="intro-hero hidden" id="i-hero">
+        <div class="intro-kicker">Business Central AL agent harness</div>
+        <h2 class="intro-title">Noah</h2>
+        <p class="intro-sub">A minimalist, developer-centric agent harness: a thin streaming wrapper around an LLM that assembles context, runs tools, and writes reviewed changes.</p>
+      </div>
+      <div class="intro-grid">
+        <div class="node intro-card hidden" id="i-what">
+          <div class="node-head"><span class="dot accent"></span>What it is</div>
+          <ul class="intro-list">
+            <li>A C#/.NET 10 CLI built around one streaming agent loop.</li>
+            <li>Four ways to drive it: interactive TUI, JSONL, JSON-RPC over stdio, or an in-process SDK.</li>
+            <li>Provider-neutral: OpenAI-compatible, Azure, Anthropic, Gemini and Ollama behind one <code>ChatMessage</code> model.</li>
+            <li><b>Primitives, not features</b>: capabilities are tools, skills and extensions, never baked into the core.</li>
+          </ul>
+        </div>
+        <div class="node intro-card hidden" id="i-why">
+          <div class="node-head"><span class="dot pink"></span>Why it was created</div>
+          <ul class="intro-list">
+            <li>A chat window alone makes <b>you</b> the integration layer: paste context in, copy answers out.</li>
+            <li>No file access, no ability to build or test, no memory between sessions, no repeatable workflow.</li>
+            <li>Noah closes that gap while staying small, transparent and inspectable.</li>
+          </ul>
+        </div>
+        <div class="node intro-card hidden" id="i-solves">
+          <div class="node-head"><span class="dot assistant"></span>Problems it solves</div>
+          <ul class="intro-list">
+            <li><b>Context engineering</b>: system prompt, AGENTS.md, skills and history assembled automatically each turn.</li>
+            <li><b>Tool access</b>: read and write files, run shells, search symbols, review diffs.</li>
+            <li><b>Memory</b>: branchable session trees, persisted and compacted as they grow.</li>
+            <li><b>Review boundary</b>: changes proposed as VS Code diffs, never silently applied.</li>
+            <li><b>No lock-in</b>: swap models or vendors without changing your workflow.</li>
+          </ul>
+        </div>
+        <div class="node intro-card hidden" id="i-bc">
+          <div class="node-head"><span class="dot tool"></span>Business Central tooling</div>
+          <ul class="intro-list">
+            <li>16 AL tools including <code>al_init</code>, <code>al_project</code>, <code>al_objects</code>, <code>al_build</code>, <code>al_test</code> and <code>al_audit</code>.</li>
+            <li><b>Specification-first</b>: scope questions, then <code>extension-spec.md</code> and an implementation plan.</li>
+            <li><b>Symbol search</b> across project source and downloaded dependencies through the AL language server.</li>
+            <li><b>Evidence</b>: Microsoft Learn citations, compiler diagnostics and a verification report.</li>
+            <li><b>Safe boundary</b>: it never publishes, installs or upgrades an environment without an explicit request.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="intro-note hidden" id="i-note">Use the tabs to explore: the manual problem, the harness loop, prompt growth, GPU generation, the Business Central build, and the full tool catalog.</div>
+    </div>
+  </section>
+
+  <!-- ============ SCENE 0 ============ -->
+  <section class="scene" id="scene-chat">
+    <p class="scene-desc">The problem before the harness: a plain chat window, where you paste context in and copy answers out by hand.</p>
+    <div class="stage" id="stage-chat">
+      <div class="chat-grid">
+        <div class="node hidden" id="c-editor">
+          <div class="node-head"><span class="dot assistant"></span>Your project <span class="sub">5 files</span></div>
+          <div class="filelist" id="c-files">
+            <div class="fitem active">src/main.al <span class="tag">pasted</span></div>
+            <div class="fitem unseen">app.json <span class="tag">invisible to the model</span></div>
+            <div class="fitem unseen">src/Helper.al <span class="tag">invisible</span></div>
+            <div class="fitem unseen">src/Sales.Page.al <span class="tag">invisible</span></div>
+            <div class="fitem unseen">Docs/README.md <span class="tag">invisible</span></div>
+          </div>
+          <pre class="code-view" id="c-editor-code">codeunit 50100 "Fix"
+{
+    procedure DoIt()
+    var
+        Rec: Record "Item";
+    begin
+        Rec.Get(Rec."No.");
+        Message('Done');
+    end;
+}</pre>
+        </div>
+        <div class="node hidden" id="c-chatnode">
+          <div class="node-head"><span class="dot system"></span>Generic LLM chat <span class="sub">no tools · no memory</span></div>
+          <div class="chatwin" id="c-chat"></div>
+        </div>
+      </div>
+      <div class="friction">
+        <div class="fr"><span id="c-fr-paste">0</span>manual pastes in</div>
+        <div class="fr"><span id="c-fr-copy">0</span>manual copies out</div>
+        <div class="fr bad"><span id="c-fr-files">1 of 5</span>files the model can see</div>
+        <div class="fr bad">0 tools available</div>
+        <div class="fr bad">context lost each session</div>
+      </div>
+      <div class="chat-banner" id="c-banner">A harness discovers and reads the files it needs with tools, assembles the context, runs the build, and writes reviewed changes for you.</div>
+      <div class="packet-layer" id="c-packets"></div>
+    </div>
+  </section>
+
+  <!-- ============ SCENE 1 ============ -->
+  <section class="scene" id="scene-loop">
+    <p class="scene-desc">The core agent loop: text in, context assembled, the model streams text and tool calls back, tools run, and the loop repeats.</p>
+    <div class="stage" id="stage-loop">
+      <div class="loop-row">
+        <div class="node hidden" id="l-user">
+          <div class="node-head"><span class="dot user"></span>User</div>
+          <div class="bubble user">Fix the AL build error</div>
+        </div>
+
+        <div class="node harness-node hidden" id="l-harness">
+          <div class="node-head"><span class="dot accent"></span>Harness <span class="sub">Agent.SendAsync</span></div>
+          <div class="ctx">
+            <div class="ctx-layer hidden" id="l-ctx1" data-info="system" title="Click for an example">1 · system baseline <span class="info">ⓘ</span></div>
+            <div class="ctx-layer hidden" id="l-ctx2" data-info="env" title="Click for an example">1b · environment <span class="info">ⓘ</span></div>
+            <div class="ctx-layer hidden" id="l-ctx3" data-info="agents" title="Click for an example">2 · AGENTS.md <span class="info">ⓘ</span></div>
+            <div class="ctx-layer hidden" id="l-ctx4" data-info="skills" title="Click for an example">3 · skills catalog <span class="info">ⓘ</span></div>
+          </div>
+          <div class="history" data-info="history" title="Click for an example">
+            <div class="history-head">history · append-only <span class="info">ⓘ</span></div>
+            <div class="history-list" id="l-history"></div>
+          </div>
+          <div class="node tools-node hidden" id="l-tools">
+            <div class="node-head"><span class="dot tool"></span>Tool registry</div>
+            <div class="tool-chips">
+              <span>fs_read</span><span>fs_write</span><span>shell_exec</span><span id="l-chip-build">al_build</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="node hidden" id="l-provider">
+          <div class="node-head"><span class="dot assistant"></span>LLM provider</div>
+          <div class="stream" id="l-stream"></div>
+        </div>
+      </div>
+      <div class="packet-layer" id="l-packets"></div>
+    </div>
+  </section>
+
+  <!-- ============ SCENE 2 ============ -->
+  <section class="scene" id="scene-prompt">
+    <p class="scene-desc">How each request is the previous prompt plus newly appended messages, and why the shared prefix stays cacheable.</p>
+    <div class="stage" id="stage-prompt">
+      <div class="prompt-row">
+        <div class="prompt-card" id="p-card1">
+          <div class="card-head">API call 1</div>
+          <div class="blocks" id="p-blocks1"></div>
+        </div>
+        <div class="prompt-card" id="p-card2">
+          <div class="card-head">API call 2</div>
+          <div class="blocks" id="p-blocks2"></div>
+        </div>
+        <div class="prompt-card" id="p-card3">
+          <div class="card-head">API call 3</div>
+          <div class="blocks" id="p-blocks3"></div>
+        </div>
+      </div>
+      <div class="banner" id="p-banner">The prefix is byte-identical across calls → the provider reuses its KV cache and only processes the newly appended suffix.</div>
+      <div class="packet-layer" id="p-packets"></div>
+    </div>
+  </section>
+
+  <!-- ============ SCENE 3 ============ -->
+  <section class="scene" id="scene-gpu">
+    <p class="scene-desc">Text goes in, text comes out: how one forward pass produces one token, and how the KV cache grows in GPU memory.</p>
+    <div class="stage" id="stage-gpu">
+      <div class="io-strip">
+        <div class="io-box in">
+          <div class="io-label">Text in · prompt</div>
+          <div class="io-text" id="g-in">To be or not to </div>
+        </div>
+        <div class="io-arrow">→</div>
+        <div class="io-gpu"><span class="dot accent"></span>GPU</div>
+        <div class="io-arrow">→</div>
+        <div class="io-box out">
+          <div class="io-label">Text out · generated</div>
+          <div class="io-text" id="g-out"><span class="cursor">▍</span></div>
+        </div>
+      </div>
+      <div class="gpu-row">
+        <div class="node">
+          <div class="node-head"><span class="dot system"></span>Sequence on GPU</div>
+          <div class="seq-list" id="g-seq"></div>
+        </div>
+
+        <div class="node">
+          <div class="node-head"><span class="dot accent"></span>One forward pass = one token <span class="sub">click a stage</span></div>
+          <div class="pipe">
+            <div class="pipe-stage" id="g-s1" data-info="tokenize" title="Click for an explanation">Tokenize</div>
+            <div class="pipe-arrow">→</div>
+            <div class="pipe-stage" id="g-s2" data-info="embed" title="Click for an explanation">Embed</div>
+            <div class="pipe-arrow">→</div>
+            <div class="pipe-stage" id="g-s3" data-info="transformer" title="Click for an explanation">Transformer ×L</div>
+            <div class="pipe-arrow">→</div>
+            <div class="pipe-stage" id="g-s4" data-info="logits" title="Click for an explanation">Logits</div>
+            <div class="pipe-arrow">→</div>
+            <div class="pipe-stage" id="g-s5" data-info="sample" title="Click for an explanation">Sample</div>
+          </div>
+        </div>
+
+        <div class="node vram-node">
+          <div class="node-head"><span class="dot kv"></span>GPU VRAM</div>
+          <div class="vram-block weights"><b>Model weights</b> · loaded once, frozen</div>
+          <div class="vram-block kv" id="g-kvblock">
+            <b>KV cache</b> · one row per token, per layer
+            <div class="kv-grid" id="g-kv"></div>
+          </div>
+          <div class="vram-block act" id="g-act"><b>Activations</b> · current token only</div>
+          <div class="vram-block logits" id="g-logits"><b>Logits</b> · one score per vocab item</div>
+        </div>
+      </div>
+      <div class="packet-layer" id="g-packets"></div>
+    </div>
+  </section>
+
+  <!-- ============ SCENE 4 ============ -->
+  <section class="scene" id="scene-bc">
+    <p class="scene-desc">A specification-first Business Central change: scope questions, spec and plan review, scaffolding, compile, and verification.</p>
+    <div class="stage" id="stage-bc">
+      <div class="bc-row">
+        <div class="node">
+          <div class="node-head"><span class="dot accent"></span>Noah TUI <span class="sub">/BusinessCentral</span></div>
+          <div class="skill-chip hidden" id="bc-skill"><span class="dot accent"></span>skill loaded · business-central-al</div>
+          <div class="chat" id="bc-chat"></div>
+        </div>
+
+        <div class="node">
+          <div class="node-head"><span class="dot system"></span>Project</div>
+          <div class="tree" id="bc-tree"></div>
+        </div>
+
+        <div class="node">
+          <div class="node-head"><span class="dot assistant"></span>Workflow</div>
+          <div class="flow" id="bc-flow"></div>
+        </div>
+      </div>
+      <div class="packet-layer" id="bc-packets"></div>
+    </div>
+  </section>
+
+  <!-- ============ SCENE 5 ============ -->
+  <section class="scene" id="scene-tools">
+    <p class="scene-desc">Every capability is a tool. Click any tool to pop it out and read what it does.</p>
+    <div class="stage" id="stage-tools">
+      <div class="stack-head">
+        <span class="dot accent"></span>Tool catalog
+        <span class="sub">27 tools · click any tool to pop it out and read what it does</span>
+      </div>
+      <div class="stack" id="t-stack"></div>
+    </div>
+  </section>
+
+  <!-- ============ SCENE 6 ============ -->
+  <section class="scene" id="scene-vscode">
+    <p class="scene-desc">How the TUI and VS Code work together: handshake, diff review, accept or reject, atomic writes, and change sync.</p>
+    <div class="stage" id="stage-vscode">
+      <div class="vsc-row">
+        <div class="node" id="v-tui">
+          <div class="node-head"><span class="dot accent"></span>Noah TUI <span class="sub" id="v-conn">checking editor…</span></div>
+          <div class="vsc-chat" id="v-chat"></div>
+        </div>
+        <div class="node" id="v-bridge">
+          <div class="node-head"><span class="dot pink"></span>Bridge</div>
+          <div class="bridge-items" id="v-bridge-items"></div>
+        </div>
+        <div class="node" id="v-code">
+          <div class="node-head"><span class="dot assistant"></span>VS Code</div>
+          <div class="diff hidden" id="v-diff">
+            <div class="diff-col before"><div class="diff-label">before</div><pre id="v-before"></pre></div>
+            <div class="diff-col after"><div class="diff-label">after · editable</div><pre id="v-after"></pre></div>
+          </div>
+          <div class="diff-actions hidden" id="v-actions">
+            <button class="accept" id="v-accept">Accept Noah Change</button>
+            <button class="reject" id="v-reject">Reject Noah Change</button>
+          </div>
+          <div class="preview hidden" id="v-preview">
+            <div class="preview-head">Markdown preview · mermaid</div>
+            <div class="mermaid-mock"><span class="mm-node">Operator</span><span class="mm-arrow">→</span><span class="mm-node">Adv. Count</span><span class="mm-arrow">→</span><span class="mm-node">Lot check</span></div>
+          </div>
+          <div class="sync-line hidden" id="v-sync">✓ src/main.al written atomically · workspace synced</div>
+          <div class="test-item hidden" id="v-test"><span class="ti-ico">✓</span> Noah AL Validation · passed <span class="ti-sub">current source verified</span></div>
+        </div>
+      </div>
+      <div class="packet-layer" id="v-packets"></div>
+    </div>
+  </section>
+
+  <!-- ============ SCENE 7 ============ -->
+  <section class="scene" id="scene-tui">
+    <p class="scene-desc">The TUI layout explained section by section, following a first run in an empty directory as it provisions a new extension.</p>
+    <div class="stage" id="stage-tui">
+      <div class="tui-row" id="tu-row">
+        <div class="tui-window" id="tu-window">
+          <div class="tui-titlebar"><span class="tb-dot r"></span><span class="tb-dot y"></span><span class="tb-dot g"></span><span class="tb-title">noah · TUI</span></div>
+          <div class="tui-header" id="tu-header" data-info="tui-header" title="Click to explain the header">
+            <div class="th-line th-identity"><span class="mascot">▄▄▄▄▄</span> <b>Noah b3f9c1a2</b> <span class="th-model">claude-sonnet-4</span><span class="th-right" id="tu-ctx">ctx —/256k · cache —</span></div>
+            <div class="th-line th-dir"><span class="th-cwd">~/projects/reorder-ext</span><span class="th-right">Approvals: on (sandbox)</span></div>
+            <div class="th-line th-editor"><span class="th-glyph" id="tu-glyph">○</span> <span id="tu-editor">VS Code not connected</span></div>
+          </div>
+          <div class="tui-body">
+            <div class="tui-transcript" id="tu-transcript" data-info="tui-transcript" title="Click to explain the transcript">
+              <div class="tline reason show" id="tu-hintline">transcript: streamed output, your input, reasoning, tool calls and results</div>
+            </div>
+            <div class="tui-plan" id="tu-plan" data-info="tui-plan" title="Click to explain the plan pane">
+              <div class="plan-head">Plan</div>
+              <div class="plan-list" id="tu-plan-list"></div>
+            </div>
+          </div>
+          <div class="tui-input" id="tu-input" data-info="tui-input" title="Click to explain the input area">
+            <span class="tui-prompt">›</span><span class="tui-typed" id="tu-typed"></span><span class="tui-placeholder" id="tu-placeholder">Ask a question or describe a change…</span><span class="tui-cursor">▍</span>
+          </div>
+          <div class="tui-footer" id="tu-footer" data-info="tui-footer" title="Click to explain the footer">
+            <span class="tf-status" id="tu-status">● Ready (make it count)</span>
+            <span class="tf-keys">F5 sync · / commands · Enter send · Ctrl+J newline</span>
+          </div>
+        </div>
+        <div class="vsc-win" id="tu-vscode">
+          <div class="vsc-titlebar"><span class="tb-dot r"></span><span class="tb-dot y"></span><span class="tb-dot g"></span><span class="tb-title">VS Code · reorder-ext</span></div>
+          <div class="vsc-badge" id="tu-vsc-badge">○ connecting…</div>
+          <div class="vsc-side">
+            <div class="vsc-file show">app.json</div>
+            <div class="vsc-file show">src/tables/Reorder.Table.al</div>
+            <div class="vsc-file show">src/pages/Reorder.Page.al</div>
+            <div class="vsc-file show">Docs/extension-spec.md</div>
+          </div>
+        </div>
+      </div>
+      <div class="packet-layer" id="tu-packets"></div>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="caption"><span class="badge" id="step-badge">1</span><span class="text" id="caption-text">Press play to start.</span></div>
+  <div class="legend">
+    <span><i style="background:var(--system)"></i>system</span>
+    <span><i style="background:var(--user)"></i>user</span>
+    <span><i style="background:var(--assistant)"></i>assistant / model</span>
+    <span><i style="background:var(--tool)"></i>tool</span>
+    <span><i style="background:var(--kv)"></i>KV cache</span>
+    <span><i style="background:var(--pink)"></i>newly appended</span>
+    <span>space = play/pause · R = restart · 0–7 = scenes</span>
+    <span class="click-legend">ⓘ dashed outline = clickable</span>
+    <span class="tagline"><b>NOAH</b> · Neutral · On-demand · Auditable · Harness</span>
+  </div>
+</footer>
+
+<div class="modal-backdrop" id="modal" aria-hidden="true">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+    <div class="modal-head">
+      <div>
+        <div class="modal-kicker" id="modal-kicker">Context layer</div>
+        <h2 id="modal-title">System baseline</h2>
+      </div>
+      <button class="modal-close" id="modal-close" aria-label="Close">✕</button>
+    </div>
+    <p class="modal-explain" id="modal-explain"></p>
+    <div class="modal-src" id="modal-src"></div>
+    <pre class="modal-code" id="modal-code"></pre>
+    <div id="modal-extra"></div>
+  </div>
+</div>
+
+<script>
+(() => {
+  "use strict";
+  const $  = (s, r=document) => r.querySelector(s);
+  const $$ = (s, r=document) => [...r.querySelectorAll(s)];
+  const ABORT = Symbol("abort");
+  const state = { paused:false, speed:0.5, abort:0, scene:"loop", running:false };
+
+  /* ---------------- timing / abort ---------------- */
+  function wait(ms){
+    const token = state.abort;
+    return new Promise((resolve,reject)=>{
+      let remaining = ms;
+      const step = () => {
+        if (token !== state.abort) return reject(ABORT);
+        if (state.paused){ setTimeout(step, 50); return; }
+        remaining -= 20 * state.speed;
+        if (remaining <= 0) resolve(); else setTimeout(step, 20);
+      };
+      step();
+    });
+  }
+  const dur = ms => ms / state.speed;
+
+  function tween(ms, onFrame){
+    const token = state.abort;
+    return new Promise((resolve,reject)=>{
+      const total = dur(ms);
+      let elapsed = 0, last = performance.now();
+      const tick = now => {
+        if (token !== state.abort) return reject(ABORT);
+        if (!state.paused) elapsed += (now - last) * state.speed;
+        last = now;
+        const t = total <= 0 ? 1 : Math.min(1, elapsed / total);
+        onFrame(1 - Math.pow(1 - t, 3), t);
+        if (t >= 1) resolve(); else requestAnimationFrame(tick);
+      };
+      requestAnimationFrame(tick);
+    });
+  }
+
+  /* ---------------- small helpers ---------------- */
+  const show = (el, delay=0) => new Promise(async res => {
+    if (delay) await wait(delay);
+    el.classList.remove("hidden"); el.classList.add("visible");
+    res();
+  });
+  function reveal(el){ el.classList.remove("hidden"); el.classList.add("visible"); }
+  function hideAll(scope){ $$(".hidden, .visible", scope).forEach(e=>{ if(e.dataset.keep!=="1"){ e.classList.add("hidden"); e.classList.remove("visible"); }}); }
+  function pulse(el){ el.classList.remove("pulse"); void el.offsetWidth; el.classList.add("pulse"); }
+  function caption(n, text){ $("#step-badge").textContent = n; $("#caption-text").textContent = text; }
+
+  function stageOf(el){ return el.closest(".stage"); }
+  function centerIn(el, stage){
+    const r = el.getBoundingClientRect(), s = stage.getBoundingClientRect();
+    return { x:r.left-s.left+r.width/2, y:r.top-s.top+r.height/2 };
+  }
+  async function fly(fromEl, toEl, {label="", cls="req", ms=760, fade=true}={}){
+    const stage = stageOf(fromEl) || stageOf(toEl);
+    const layer = stage.querySelector(".packet-layer");
+    const a = centerIn(fromEl, stage), b = centerIn(toEl, stage);
+    const p = document.createElement("div");
+    p.className = "packet " + cls; p.textContent = label;
+    p.style.left = a.x + "px"; p.style.top = a.y + "px"; p.style.transform = "translate(-50%,-50%)";
+    p.style.opacity = "0";
+    layer.appendChild(p);
+    void p.offsetWidth;
+    const dx = b.x - a.x, dy = b.y - a.y;
+    await tween(ms, (e,t)=>{
+      p.style.transform = `translate(calc(-50% + ${dx*e}px), calc(-50% + ${dy*e}px))`;
+      if (fade) p.style.opacity = t < .15 ? (t/.15) : (t > .8 ? (1-t)/.2 : 1);
+      else p.style.opacity = 1;
+    });
+    p.remove();
+  }
+  async function streamText(container, text, cls, msPerChar=26){
+    const el = document.createElement("div");
+    el.className = "tok " + cls; container.appendChild(el);
+    for (let i=0;i<text.length;i++){
+      el.textContent += text[i];
+      await wait(msPerChar);
+    }
+    return el;
+  }
+
+  /* ============================================================
+     SCENE 1 — HARNESS LOOP
+     ============================================================ */
+  function resetLoop(){
+    const st = $("#stage-loop");
+    ["#l-user","#l-harness","#l-tools","#l-provider","#l-ctx1","#l-ctx2","#l-ctx3","#l-ctx4"]
+      .forEach(s=>{ const e=$(s); e.classList.add("hidden"); e.classList.remove("visible"); });
+    $("#l-history").innerHTML = ""; $("#l-stream").innerHTML = "";
+    $("#l-packets").innerHTML = "";
+    $("#l-chip-build").classList.remove("hot");
+    $("#l-provider").classList.remove("glow");
+    $("#l-tools").classList.remove("glow");
+  }
+  function addHistory(text, cls){
+    const d = document.createElement("div");
+    d.className = "h-block " + cls; d.textContent = text;
+    $("#l-history").appendChild(d); return d;
+  }
+  async function runLoop(){
+    resetLoop();
+    const user = $("#l-user"), harness = $("#l-harness"), tools = $("#l-tools"), provider = $("#l-provider");
+
+    caption(1, "The user sends plain text into the harness. The model will only ever see text and tool schemas.");
+    reveal(user); pulse(user); await wait(900);
+
+    caption(2, "The message is appended to the conversation history — the model itself is stateless between calls.");
+    await fly(user, harness, {label:"user message", cls:"txt", ms:700});
+    reveal(harness); await wait(150);
+    addHistory("user · Fix the AL build error", "user"); await wait(500);
+
+    caption(3, "Context is assembled as layers: a deterministic system prefix (system, environment, AGENTS.md, skills) plus the growing history.");
+    for (const [id,label] of [["#l-ctx1","system"],["#l-ctx2","environment"],["#l-ctx3","AGENTS.md"],["#l-ctx4","skills"]]){
+      reveal($(id)); pulse($(id)); await wait(360);
+    }
+    await wait(500);
+
+    caption(4, "A ChatRequest is built from the layers + history + tool schemas, and sent to the provider.");
+    await fly(harness, provider, {label:"ChatRequest", cls:"req", ms:820});
+    reveal(provider); pulse(provider); await wait(200);
+
+    caption(5, "The provider streams tokens back one at a time; the harness renders them live.");
+    await streamText($("#l-stream"), "I'll check the AL compiler output…", "", 22);
+    await wait(400);
+
+    caption(6, "The model emits a tool call. The harness routes it through the tool registry — the model never touches the host directly.");
+    await fly(provider, tools, {label:"tool_call: al_build", cls:"tc", ms:820});
+    reveal(tools); $("#l-chip-build").classList.add("hot"); pulse(tools); await wait(500);
+    await streamText($("#l-stream"), "⟶ al_build { project: '.' }", "tool", 14);
+    await wait(300);
+
+    caption(7, "The tool result is converted back to text and appended to history.");
+    await fly(tools, $("#l-history"), {label:"tool_result", cls:"res", ms:700});
+    addHistory("tool · 1 error: undeclared variable", "tool"); await wait(600);
+
+    caption(8, "The loop repeats: the prompt is now the previous prompt plus the assistant turn and tool result.");
+    await fly(harness, provider, {label:"ChatRequest (longer)", cls:"req", ms:820});
+    pulse(provider); await wait(200);
+    await streamText($("#l-stream"), "Found it — fixing line 42.", "", 20);
+    await wait(300);
+    await fly(provider, harness, {label:"assistant", cls:"txt", ms:700});
+    addHistory("assistant · Found it — fixing line 42.", "assistant"); await wait(400);
+
+    caption(9, "No more tool calls: the final text is the answer. The turn is persisted and shown to the user.");
+    await fly(harness, user, {label:"final answer", cls:"res", ms:820});
+    pulse(user); await wait(1400);
+  }
+
+  /* ============================================================
+     SCENE 2 — PROMPT GROWTH
+     ============================================================ */
+  const PROMPTS = {
+    "#p-blocks1": [
+      {t:"system", label:"system baseline + AGENTS.md + skills", kind:"shared"},
+      {t:"user", label:"user 1 · Fix the AL build error", kind:"shared"},
+    ],
+    "#p-blocks2": [
+      {t:"system", label:"system baseline + AGENTS.md + skills", kind:"shared"},
+      {t:"user", label:"user 1 · Fix the AL build error", kind:"shared"},
+      {t:"assistant", label:"assistant 1 · tool_call al_build", kind:"new"},
+      {t:"tool", label:"tool · 1 error: undeclared variable", kind:"new"},
+    ],
+    "#p-blocks3": [
+      {t:"system", label:"system baseline + AGENTS.md + skills", kind:"shared"},
+      {t:"user", label:"user 1 · Fix the AL build error", kind:"shared"},
+      {t:"assistant", label:"assistant 1 · tool_call al_build", kind:"shared"},
+      {t:"tool", label:"tool · 1 error: undeclared variable", kind:"shared"},
+      {t:"assistant", label:"assistant 2 · Found it", kind:"new"},
+      {t:"user", label:"user 2 · Now add a test", kind:"new"},
+    ],
+  };
+  function resetPrompt(){
+    $("#p-packets").innerHTML = "";
+    $("#p-banner").classList.remove("show");
+    ["#p-blocks1","#p-blocks2","#p-blocks3"].forEach(id=>{ $(id).innerHTML=""; });
+    ["#p-card1","#p-card2","#p-card3"].forEach(id=> $(id).classList.remove("src"));
+  }
+  async function buildCard(blocksId, cardId, delay=0){
+    const host = $(blocksId);
+    for (const b of PROMPTS[blocksId]){
+      const d = document.createElement("div");
+      d.className = `blk t-${b.t} ${b.kind}`; d.textContent = b.label;
+      host.appendChild(d);
+      void d.offsetWidth;
+      d.classList.add("show");
+      if (b.kind === "new"){ pulse(d); }
+      await wait(delay || 260);
+    }
+  }
+  async function runPrompt(){
+    resetPrompt();
+    caption(1, "Each API call is a fresh, stateless request. The harness rebuilds the system prefix and resends the whole conversation.");
+    await buildCard("#p-blocks1", "#p-card1", 300);
+    await wait(500);
+
+    caption(2, "Call 2 copies call 1's prompt, then appends the assistant turn and the tool result.");
+    $("#p-card1").classList.add("src"); pulse($("#p-card1")); await wait(650);
+    await buildCard("#p-blocks2", "#p-card2", 280);
+    $("#p-card1").classList.remove("src"); await wait(600);
+
+    caption(3, "Call 3 copies call 2, then appends the assistant's answer and the next user message. History is never rewritten — only appended to.");
+    $("#p-card2").classList.add("src"); pulse($("#p-card2")); await wait(650);
+    await buildCard("#p-blocks3", "#p-card3", 280);
+    $("#p-card2").classList.remove("src"); await wait(500);
+
+    caption(4, "Because the shared prefix is byte-identical, the provider reuses its KV cache and only computes the newly appended suffix.");
+    $("#p-banner").classList.add("show");
+    await wait(2200);
+  }
+
+  /* ============================================================
+     SCENE 3 — GPU GENERATION
+     ============================================================ */
+  const LAYERS = 4;
+  function resetGpu(){
+    $("#g-seq").innerHTML = ""; $("#g-kv").innerHTML = "";
+    $("#g-packets").innerHTML = "";
+    ["#g-s1","#g-s2","#g-s3","#g-s4","#g-s5"].forEach(s=>$(s).classList.remove("on"));
+    ["#g-act","#g-logits","#g-kvblock"].forEach(s=>$(s).classList.remove("live"));
+    $$("#g-seq .chip").forEach(c=>c.remove());
+    $("#g-out").innerHTML = '<span class="cursor">\u258D</span>';
+  }
+  function addChip(label, cls){
+    const d = document.createElement("div");
+    d.className = "chip " + cls; d.textContent = label;
+    $("#g-seq").appendChild(d); return d;
+  }
+  function addKvRow(){
+    const row = document.createElement("div");
+    row.style.display = "contents";
+    const cells = [];
+    for (let i=0;i<LAYERS;i++){
+      const c = document.createElement("div"); c.className = "kv-cell"; row.appendChild(c); cells.push(c);
+    }
+    $("#g-kv").appendChild(row);
+    return cells;
+  }
+  async function wave(){
+    for (const s of ["#g-s1","#g-s2","#g-s3","#g-s4","#g-s5"]){
+      $(s).classList.add("on"); await wait(130); $(s).classList.remove("on");
+    }
+  }
+  async function litCells(cells, cls="lit"){
+    for (const c of cells){ c.classList.add(cls); await wait(70); }
+  }
+  async function runGpu(){
+    resetGpu();
+    caption(1, "Text goes in. Prefill processes the whole prompt in one pass and fills the KV cache.");
+    const sys = addChip("⟨system⟩", "prompt");
+    const usr = addChip("⟨user 1⟩", "prompt");
+    await wait(500);
+    for (const chip of [sys, usr]){
+      pulse(chip); await wave();
+      const cells = addKvRow(); await litCells(cells);
+    }
+    await wait(500);
+
+    const generated = [
+      { chip:"be",   text:"be"    },
+      { chip:",",    text:","     },
+      { chip:"that", text:" that" },
+      { chip:"is",   text:" is"   }
+    ];
+    let outText = "";
+    const appendOut = (t) => {
+      outText += t;
+      const el = $("#g-out"); el.textContent = outText;
+      const cur = document.createElement("span"); cur.className = "cursor"; cur.textContent = "\u258D"; el.appendChild(cur);
+    };
+    for (let i=0;i<generated.length;i++){
+      caption(2+i, `Decode step ${i+1}: only the newest token is fed forward. Past tokens are read from the KV cache, and VRAM grows by one row.`);
+
+      // only newest token is fed
+      $$("#g-seq .chip").forEach(c=>c.classList.add("dim"));
+      const prev = $$("#g-seq .chip").slice(-1)[0];
+      prev.classList.remove("dim"); prev.classList.add("feed"); pulse(prev);
+      await wait(450);
+
+      // forward pass
+      await wave();
+
+      // attention reads the cache
+      $("#g-kvblock").classList.add("live");
+      $$("#g-kv .kv-cell").forEach(c=>c.classList.add("read"));
+      await wait(350);
+      $$("#g-kv .kv-cell").forEach(c=>c.classList.remove("read"));
+
+      // sample the next token, append it and its KV row
+      $("#g-logits").classList.add("live"); await wait(180); $("#g-logits").classList.remove("live");
+      const next = addChip("⟨" + generated[i].chip + "⟩", "gen");
+      pulse(next);
+      appendOut(generated[i].text);
+      const cells = addKvRow(); await litCells(cells);
+      $("#g-kvblock").classList.remove("live");
+      prev.classList.remove("feed");
+      await wait(500);
+    }
+    caption(7, "Text comes out: \"be, that is\". Weights stay fixed while the KV cache and sequence grow by one row per token — which is why VRAM grows with output length.");
+    await wait(2200);
+  }
+
+  /* ============================================================
+     SCENE 4 — BUSINESS CENTRAL BUILD
+     ============================================================ */
+  const BC_STAGES = [
+    ["skill","Load BC skill"],
+    ["bootstrap","Bootstrap project"],
+    ["scope","Scope questions"],
+    ["spec","extension-spec.md"],
+    ["plan","implementation-plan.md"],
+    ["scaffold","Scaffold AL objects"],
+    ["build","al_build"],
+    ["verify","al_audit / verify"],
+  ];
+  function resetBc(){
+    $("#bc-chat").innerHTML = ""; $("#bc-tree").innerHTML = ""; $("#bc-packets").innerHTML = "";
+    const skill = $("#bc-skill"); skill.classList.add("hidden"); skill.classList.remove("visible");
+    const flow = $("#bc-flow"); flow.innerHTML = "";
+    for (const [id,label] of BC_STAGES){
+      const d = document.createElement("div");
+      d.className = "stage-item"; d.id = "bc-stage-" + id;
+      d.innerHTML = '<span class="marker"></span><span>' + label + '</span>';
+      flow.appendChild(d);
+    }
+  }
+  function bcStage(id, state){
+    const el = $("#bc-stage-" + id); if (!el) return;
+    el.classList.remove("active","done");
+    if (state) el.classList.add(state);
+    el.querySelector(".marker").textContent = state === "done" ? "✓" : state === "active" ? "●" : "";
+  }
+  function bcMsg(html, cls, who){
+    const d = document.createElement("div");
+    d.className = "msg " + cls;
+    d.innerHTML = (who ? '<span class="who">' + who + '</span>' : "") + html;
+    $("#bc-chat").appendChild(d); void d.offsetWidth; d.classList.add("show");
+    const host = d.parentElement;
+    requestAnimationFrame(() => { host.scrollTop = host.scrollHeight; });
+    return d;
+  }
+  function bcTool(name, result){
+    return bcMsg("→ " + name + (result ? ' <span style="color:#8b98ad">' + result + '</span>' : ""), "tool", "tool call");
+  }
+  function bcFile(label, opts = {}){
+    const d = document.createElement("div");
+    d.className = "item" + (opts.dir ? " dir" : "") + (opts.indent ? " indent" + opts.indent : "") + (opts.cls ? " " + opts.cls : "");
+    d.innerHTML = '<span class="ico">' + (opts.dir ? "▸" : "•") + '</span><span>' + label + '</span>';
+    $("#bc-tree").appendChild(d); void d.offsetWidth; d.classList.add("show");
+    return d;
+  }
+  async function runBc(){
+    resetBc();
+
+    caption(1, "The user switches Noah into Business Central posture with /BusinessCentral. The bundled business-central-al skill is disclosed on demand.");
+    bcMsg("/BusinessCentral", "user", "you");
+    await wait(400);
+    const skill = $("#bc-skill");
+    skill.classList.remove("hidden"); skill.classList.add("visible"); pulse(skill);
+    bcStage("skill","active"); await wait(750); bcStage("skill","done");
+    await wait(300);
+
+    caption(2, "In an empty directory Noah bootstraps a conservative AL project and downloads compiler symbols. Existing files are never overwritten.");
+    bcStage("bootstrap","active");
+    bcTool("al_init");
+    await wait(450);
+    bcFile("app.json"); await wait(140);
+    bcFile(".vscode/",{dir:true}); await wait(140);
+    bcFile("launch.json",{indent:1}); await wait(110);
+    bcFile("settings.json",{indent:1}); await wait(110);
+    const fReadme = bcFile("README.md"); await wait(110);
+    const fChange = bcFile("CHANGELOG.md"); await wait(300);
+    bcTool("al_downloadsymbols","Microsoft + AppSource symbols");
+    await wait(450);
+    bcFile(".alpackages/",{dir:true, cls:"newfile"}); await wait(500);
+    bcStage("bootstrap","done");
+    await wait(300);
+
+    caption(3, "The user asks for a basic extension in plain language — no config, no commands.");
+    bcMsg("Create a basic AL extension with a table and a page to manage warehouse reorder items.", "user", "you");
+    await wait(850);
+
+    caption(4, "Specification-first: the agent asks at most five material scope questions before writing any code.");
+    bcStage("scope","active");
+    bcMsg("Before I scaffold, a few scope questions:", "agent", "noah");
+    await wait(350);
+    bcMsg("Q1 · Target Business Central application version?", "q"); await wait(280);
+    bcMsg("→ 25.0.0.0", "q"); await wait(280);
+    bcMsg("Q2 · Object ID range?", "q"); await wait(280);
+    bcMsg("→ 50100–50149", "q"); await wait(280);
+    bcMsg("Q3 · Publisher / prefix?", "q"); await wait(280);
+    bcMsg("→ Byoma / WRO", "q"); await wait(500);
+    bcStage("scope","done");
+    await wait(300);
+
+    caption(5, "Noah writes Docs/extension-spec.md and opens it in VS Code as a diff for explicit review before planning.");
+    bcStage("spec","active");
+    bcTool("al_questions","confirm scope"); await wait(300);
+    bcMsg("vscode_review · Docs/extension-spec.md — accepted", "agent", "noah"); await wait(300);
+    bcFile("Docs/",{dir:true}); await wait(140);
+    bcFile("extension-spec.md",{indent:1, cls:"newfile"}); await wait(600);
+    bcStage("spec","done");
+    await wait(300);
+
+    caption(6, "After approval, an implementation plan of up to ten independently verifiable tasks is created and tracked live in the TUI.");
+    bcStage("plan","active");
+    bcFile("implementation-plan.md",{indent:1, cls:"newfile"}); await wait(300);
+    bcMsg("Plan · 1) table&nbsp; 2) page&nbsp; 3) codeunit&nbsp; 4) build&nbsp; 5) verify", "agent", "noah");
+    await wait(700);
+    bcStage("plan","done");
+    await wait(300);
+
+    caption(7, "al_scaffold_object allocates object IDs and generates the AL objects; each change is reviewed as a VS Code diff before it lands.");
+    bcStage("scaffold","active");
+    bcTool("al_scaffold_object","table 50100");
+    bcFile("src/",{dir:true}); await wait(140);
+    bcFile("WROReorderItem.Table.al",{indent:1, cls:"newfile"}); await wait(240);
+    bcTool("al_scaffold_object","page 50101");
+    bcFile("WROReorderItems.Page.al",{indent:1, cls:"newfile"}); await wait(240);
+    bcTool("al_scaffold_object","codeunit 50102");
+    bcFile("WROReorderMgt.Codeunit.al",{indent:1, cls:"newfile"}); await wait(500);
+    bcStage("scaffold","done");
+    await wait(300);
+
+    caption(8, "al_build compiles and returns structured diagnostics. A compile error is fed back to the model, which fixes it and rebuilds.");
+    bcStage("build","active");
+    bcTool("al_build"); await wait(500);
+    bcMsg("compiler · AL0118: 'Rec. No.' is not a valid field on table 50100", "q"); await wait(650);
+    bcTool("fs_write","src/WROReorderItem.Table.al"); await wait(300);
+    bcTool("al_build"); await wait(500);
+    bcMsg("build succeeded · 0 errors, 0 warnings", "ok"); await wait(500);
+    bcStage("build","done");
+    await wait(300);
+
+    caption(9, "al_audit writes an evidence-backed verification report, and the documentation gate requires README + CHANGELOG to reflect the change.");
+    bcStage("verify","active");
+    bcTool("al_audit"); await wait(350);
+    bcFile("verification-report.md",{indent:1, cls:"newfile"}); await wait(400);
+    [fReadme, fChange].forEach(f => { f.classList.add("touched"); pulse(f); });
+    await wait(600);
+    bcStage("verify","done");
+    await wait(300);
+
+    caption(10, "The work is committed on a dedicated branch; publishing or installing still requires an explicit developer request.");
+    bcTool("git","branch noah/reorder-items-7f3a");
+    await wait(600);
+    bcMsg("Extension scaffolded, compiled and verified. Ready for your review.", "ok", "noah");
+    await wait(2400);
+  }
+
+  /* ============================================================
+     SCENE 5 — TOOL CATALOG
+     ============================================================ */
+  const TOOLS = [
+    { n:"skill_load",            g:"core", d:"Loads a skill's full instructions on demand, keeping the system prompt small.", ex:'skill_load { "name": "business-central-al" }' },
+    { n:"util_now",              g:"core", d:"Returns the current UTC / local time.", ex:'util_now {}' },
+    { n:"consult_model",         g:"core", d:"Asks a second configured model for a critique or second opinion.", ex:'consult_model { "question": "Is this refactor safe?" }' },
+    { n:"switch_model",          g:"core", d:"Switches the active model profile for subsequent turns.", ex:'switch_model { "name": "fast" }' },
+    { n:"guard_blocked",         g:"core", d:"Internal: reports a tool call that the safety guard blocked.", ex:'guard_blocked { "tool": "fs_write", "reason": "path escapes the workspace" }' },
+    { n:"shell_exec",            g:"host", d:"Runs a command in the host shell and returns stdout, stderr and exit code.", ex:'shell_exec { "command": "dotnet build" }' },
+    { n:"fs_read",               g:"host", d:"Reads a UTF-8 text file with its byte size and line count.", ex:'fs_read { "path": "src/main.al" }' },
+    { n:"fs_write",              g:"host", d:"Writes UTF-8 text, creating directories as needed.", ex:'fs_write { "path": "src/main.al", "content": "…" }' },
+    { n:"fs_list",               g:"host", d:"Lists a directory with names, kinds, sizes and timestamps.", ex:'fs_list { "path": "." }' },
+    { n:"fs_glob",               g:"host", d:"Finds files matching a glob such as **/*.cs.", ex:'fs_glob { "pattern": "**/*.al" }' },
+    { n:"vscode_review",         g:"host", d:"Opens a proposed change as a VS Code diff and asks before applying it.", ex:'vscode_review { "path": "src/main.al" }' },
+    { n:"al_init",               g:"bc",   d:"Provisions a conservative starter AL extension without overwriting files.", ex:'al_init { "name": "My Extension", "application": "25.0.0.0" }' },
+    { n:"al_project",            g:"bc",   d:"Inspects the AL manifest, workspace layout and symbol packages.", ex:'al_project { "project": "." }' },
+    { n:"al_objects",            g:"bc",   d:"Inventories AL object kinds, IDs, names, targets and source locations.", ex:'al_objects { "kind": "tableextension" }' },
+    { n:"al_scaffold_object",    g:"bc",   d:"Allocates an unused object ID and generates a review-ready AL object.", ex:'al_scaffold_object { "kind": "table", "name": "WRO Reorder Item" }' },
+    { n:"al_probe_ranges",       g:"bc",   d:"Checks the read-only sandbox probe and suggests free PTE object-ID ranges.", ex:'al_probe_ranges { "action": "suggest" }' },
+    { n:"al_downloadsymbols",    g:"bc",   d:"Downloads the Microsoft / AppSource symbols needed to compile.", ex:'al_downloadsymbols { "project": "." }' },
+    { n:"al_symbolsearch",       g:"bc",   d:"Searches project and dependency symbols through the AL language server.", ex:'al_symbolsearch { "query": "Item Ledger Entry" }' },
+    { n:"al_build",              g:"bc",   d:"Compiles the project with alc and returns structured diagnostics.", ex:'al_build { "project": "." }' },
+    { n:"al_test",               g:"bc",   d:"Runs selected AL tests against a sandbox or on-prem test environment.", ex:'al_test { "project": ".", "codeunits": ["My Tests"] }' },
+    { n:"al_validate",           g:"bc",   d:"Runs a test runner or records a confirmed manual check as evidence.", ex:'al_validate { "action": "run", "runner": "dotnet-test" }' },
+    { n:"al_bug",                g:"bc",   d:"Records a numbered, evidence-supported bug finding under Docs/bugs.", ex:'al_bug { "summary": "Lot No. not validated", "evidence": "…" }' },
+    { n:"al_audit",              g:"bc",   d:"Writes an evidence-backed AL verification report.", ex:'al_audit { "summary": "Add reorder table and page" }' },
+    { n:"al_workflow",           g:"bc",   d:"Manages the spec and implementation-plan workflow state.", ex:'al_workflow { "action": "initialize", "title": "Reorder items" }' },
+    { n:"al_questions",          g:"bc",   d:"Presents clarification and document-review questions in the TUI.", ex:'al_questions { "questions": [ … ] }' },
+    { n:"microsoft_docs_search", g:"bc",   d:"Searches current official Microsoft Learn documentation.", ex:'microsoft_docs_search { "query": "AL tableextension syntax" }' },
+    { n:"microsoft_docs_fetch",  g:"bc",   d:"Fetches a Learn page and records citation evidence.", ex:'microsoft_docs_fetch { "url": "https://learn.microsoft.com/…" }' },
+  ];
+  const GROUPS = { core:"Core · model & session", host:"Host · shell & filesystem", bc:"Business Central" };
+  const GROUP_SHORT = { core:"Core", host:"Host", bc:"Business Central" };
+  const GROUP_SRC = { core:"Noah.Core — core tool registry", host:"Noah.Extensions.Builtin", bc:"Noah.Extensions.BusinessCentral" };
+
+  function buildTools(){
+    const stack = $("#t-stack"); stack.innerHTML = "";
+    let last = null;
+    TOOLS.forEach((t,i)=>{
+      if (t.g !== last){
+        const h = document.createElement("div"); h.className = "stack-grp"; h.textContent = GROUPS[t.g];
+        stack.appendChild(h); last = t.g;
+      }
+      const c = document.createElement("div");
+      c.className = "tool-card g-" + t.g; c.id = "t-card-" + i;
+      c.innerHTML = '<span class="tc-name"></span><span class="tc-desc"></span><span class="tc-go">\u24D8</span>';
+      c.querySelector(".tc-name").textContent = t.n;
+      c.querySelector(".tc-desc").textContent = t.d;
+      c.addEventListener("click", () => { popTool(i); showToolModal(i); });
+      stack.appendChild(c);
+    });
+  }
+  function popTool(i){
+    $$("#t-stack .tool-card").forEach(c => c.classList.remove("popped"));
+    const c = $("#t-card-" + i);
+    if (c){ c.classList.add("popped"); c.scrollIntoView({ block:"center", behavior:"smooth" }); }
+  }
+  function showToolModal(i){
+    const t = TOOLS[i];
+    showModal({
+      kicker: GROUP_SHORT[t.g] + " · tool",
+      title: t.n,
+      explain: t.d,
+      src: GROUP_SRC[t.g],
+      code: t.ex
+    });
+  }
+  async function runTools(){
+    buildTools();
+    caption(1, "Every capability in Noah is a tool in one registry: 5 core, 6 host, and 16 Business Central tools. Click any tool to pop it out and read what it does.");
+  }
+
+  /* ============================================================
+     SCENE 6 — VS CODE BRIDGE
+     ============================================================ */
+  const VSC_CHIPS = [
+    ["handshake-req", ".request"],
+    ["handshake-conn", ".connected"],
+    ["temp", "before- / after- · temp dir"],
+    ["decision", ".noah-decision · accept"],
+    ["decision-reject", ".noah-decision · reject"],
+    ["signal", "signal-*.json"],
+    ["test", "test-result-*.json"],
+  ];
+  function resetVscode(){
+    $("#v-chat").innerHTML = ""; $("#v-packets").innerHTML = "";
+    $("#v-conn").textContent = "checking editor…";
+    ["#v-diff","#v-actions","#v-preview","#v-sync","#v-test"].forEach(s => { const e = $(s); e.classList.add("hidden"); e.classList.remove("visible"); });
+    $("#v-accept").classList.remove("pressed"); $("#v-reject").classList.remove("pressed");
+    const host = $("#v-bridge-items"); host.innerHTML = "";
+    for (const [id,label] of VSC_CHIPS){
+      const d = document.createElement("div"); d.className = "bridge-chip"; d.id = "v-chip-" + id; d.textContent = label; host.appendChild(d);
+    }
+  }
+  function bridgeOn(id){ const c = $("#v-chip-" + id); if (c){ c.classList.add("on"); pulse(c); } }
+  function vMsg(html, cls, who){
+    const d = document.createElement("div");
+    d.className = "msg " + cls;
+    d.innerHTML = (who ? '<span class="who">' + who + '</span>' : "") + html;
+    $("#v-chat").appendChild(d); void d.offsetWidth; d.classList.add("show");
+    const host = d.parentElement;
+    requestAnimationFrame(() => { host.scrollTop = host.scrollHeight; });
+    return d;
+  }
+  function showDiff(){
+    $("#v-before").textContent =
+      'codeunit 50100 "Reorder"\n' +
+      '{\n' +
+      '    procedure Check()\n' +
+      '    begin\n' +
+      '        // no validation\n' +
+      '    end;\n' +
+      '}';
+    $("#v-after").textContent =
+      'codeunit 50100 "Reorder"\n' +
+      '{\n' +
+      '    procedure Check()\n' +
+      '    begin\n' +
+      '        if Rec."No." = \'\' then\n' +
+      '            Error(\'No. required\');\n' +
+      '    end;\n' +
+      '}';
+    reveal($("#v-diff"));
+  }
+  async function runVscode(){
+    resetVscode();
+    const tui = $("#v-tui"), code = $("#v-code");
+    reveal(tui); reveal($("#v-bridge")); reveal(code); await wait(500);
+
+    caption(1, "Noah and VS Code talk over a local file bridge. On startup Noah checks that VS Code is running and performs a silent handshake.");
+    $("#v-conn").textContent = "connecting…";
+    bridgeOn("handshake-req");
+    await fly(tui, code, {label:"handshake request", cls:"req", ms:650});
+    bridgeOn("handshake-conn");
+    await fly(code, tui, {label:"connected", cls:"res", ms:650});
+    $("#v-conn").textContent = "editor review available";
+    vMsg("Editor review connected via the Noah Review extension.", "ok", "noah");
+    await wait(950);
+
+    caption(2, "You ask for a change. In Business Central posture a direct fs_write is rerouted to vscode_review with the complete proposed file.");
+    vMsg("Add validation to the reorder codeunit.", "user", "you");
+    await wait(450);
+    vMsg("→ vscode_review { path: src/main.al }", "tool", "tool call");
+    bridgeOn("temp");
+    await wait(400);
+    await fly(tui, code, {label:"proposed file", cls:"req", ms:700});
+    showDiff();
+    await wait(750);
+
+    caption(3, "VS Code opens a diff with Accept and Reject actions. You can edit the right-hand file before deciding.");
+    reveal($("#v-actions"));
+    pulse($("#v-after")); await wait(950);
+
+    caption(4, "Accept records the decision on the bridge and closes the diff.");
+    $("#v-accept").classList.add("pressed");
+    bridgeOn("decision");
+    await fly(code, tui, {label:"decision: accept", cls:"res", ms:650});
+    await wait(500);
+
+    caption(5, "Noah reads the reviewed content and writes the real file atomically. The workspace syncs.");
+    vMsg("applied: true · 1,204 bytes", "ok", "tool result");
+    reveal($("#v-sync"));
+    await wait(1000);
+
+    caption(6, "Markdown containing a fenced mermaid diagram opens the rendered preview beside the diff.");
+    vMsg("→ vscode_review { path: Docs/extension-spec.md }", "tool", "tool call");
+    await fly(tui, code, {label:"spec.md (mermaid)", cls:"req", ms:650});
+    reveal($("#v-preview"));
+    await wait(1200);
+
+    caption(7, "Reject leaves the file untouched: applied: false, and Noah revises its proposal.");
+    $("#v-reject").classList.add("pressed");
+    bridgeOn("decision-reject");
+    await fly(code, tui, {label:"decision: reject", cls:"tc", ms:650});
+    vMsg("applied: false, revising the proposal.", "q", "noah");
+    await wait(1100);
+
+    caption(8, "If VS Code is not connected, the same review falls back to a terminal confirmation.");
+    $("#v-conn").textContent = "editor unavailable";
+    vMsg("VS Code review is unavailable. Apply the proposed changes to src/main.al without an editor diff?", "q", "confirm");
+    vMsg("Apply the reviewed changes? [y/N]", "q");
+    await wait(1300);
+
+    caption(9, "Edits you make in VS Code are picked up when you click Noah: Sync Changes, a signal the TUI polls.");
+    bridgeOn("signal");
+    await fly(code, tui, {label:"signal: src/Helper.al", cls:"txt", ms:650});
+    vMsg("Workspace change detected: src/Helper.al", "ok", "noah");
+    await wait(1100);
+
+    caption(10, "AL test results are published back into VS Code's Test Explorer, with source-binding status.");
+    vMsg("→ al_test { project: \".\" }", "tool", "tool call");
+    bridgeOn("test");
+    await fly(tui, code, {label:"test-result-*.json", cls:"req", ms:650});
+    reveal($("#v-test"));
+    await wait(2800);
+  }
+
+  /* ============================================================
+     SCENE 7 — TUI ANATOMY
+     ============================================================ */
+  const TUI_PLAN = ["Load skill","Bootstrap project","Download symbols","Ask scope questions","Spec + plan","Scaffold objects","Build"];
+  function tuMsg(html, cls, who){
+    const d = document.createElement("div");
+    d.className = "tline " + cls;
+    d.innerHTML = (who ? '<span class="who">' + who + '</span>' : "") + html;
+    $("#tu-transcript").appendChild(d); void d.offsetWidth; d.classList.add("show");
+    const host = $("#tu-transcript"); host.scrollTop = host.scrollHeight;
+    return d;
+  }
+  function tuPlan(text, cls){
+    const d = document.createElement("div");
+    d.className = "plan-item " + (cls || ""); d.textContent = text;
+    $("#tu-plan-list").appendChild(d); void d.offsetWidth; d.classList.add("show");
+    return d;
+  }
+  function hl(sel, on){ const e = $(sel); if (e) e.classList.toggle("hl", on); }
+  function resetTui(){
+    $("#tu-transcript").innerHTML = ""; $("#tu-plan-list").innerHTML = "";
+    $("#tu-typed").textContent = "";
+    $("#tu-placeholder").textContent = "Ask a question or describe a change…";
+    $("#tu-placeholder").style.display = "";
+    $("#tu-ctx").textContent = "ctx —/256k · cache —";
+    $("#tu-row").classList.remove("split"); $("#tu-vscode").classList.remove("show");
+    $("#tu-glyph").textContent = "○"; $("#tu-glyph").classList.remove("on");
+    $("#tu-editor").textContent = "VS Code not connected";
+    $("#tu-vsc-badge").textContent = "○ connecting…"; $("#tu-vsc-badge").classList.remove("on");
+    $("#tu-status").textContent = "● Ready (make it count)";
+    ["#tu-header","#tu-transcript","#tu-plan","#tu-input","#tu-footer"].forEach(s => $(s).classList.remove("hl"));
+    const slash = $("#tu-slash"); if (slash) slash.remove();
+    $$("#tu-vscode .vsc-file").forEach(f => f.classList.remove("show"));
+  }
+  async function typeInto(text){
+    $("#tu-placeholder").style.display = "none";
+    const el = $("#tu-typed");
+    const slash = document.createElement("div");
+    slash.className = "slash-menu"; slash.id = "tu-slash";
+    slash.innerHTML = ["/BusinessCentral","/status","/model","/tree","/yolo"]
+      .map((c,i) => '<div class="slash-item' + (i === 0 ? " sel" : "") + '">' + c + '</div>').join("");
+    $("#tu-window").appendChild(slash); void slash.offsetWidth; slash.classList.add("show");
+    for (let i = 0; i < text.length; i++){ el.textContent += text[i]; await wait(55); }
+  }
+  async function runTui(){
+    resetTui();
+    const items = () => $$("#tu-plan-list .plan-item");
+
+    caption(1, "You open Noah in a brand-new, empty directory. This is the whole interface before any work has started.");
+    reveal($("#tu-window"));
+    tuMsg("Noah ready. Describe a change, or type /BusinessCentral to build an AL extension.", "agent", "noah");
+    await wait(1100);
+
+    hl("#tu-header", true); pulse($("#tu-header"));
+    caption(2, "Header (fixed top): build identity, active model, context/cache usage, working directory, approval mode and the VS Code review state.");
+    await wait(2000);
+    hl("#tu-header", false);
+
+    hl("#tu-transcript", true); pulse($("#tu-transcript"));
+    caption(3, "Transcript (scrollable): streamed output, your input, reasoning, tool calls and results, in its own viewport.");
+    await wait(1600);
+    hl("#tu-transcript", false);
+
+    hl("#tu-plan", true); pulse($("#tu-plan"));
+    caption(4, "Plan pane (right): once a Business Central workflow starts, it tracks each implementation task as it completes.");
+    for (const t of TUI_PLAN){ tuPlan("○ " + t, ""); await wait(170); }
+    await wait(500);
+    hl("#tu-plan", false);
+
+    hl("#tu-input", true); hl("#tu-footer", true); pulse($("#tu-input"));
+    caption(5, "Input (pinned bottom) with a live status and shortcut footer. You type /BusinessCentral to load the bundled skill.");
+    await wait(700);
+    await typeInto("/BusinessCentral");
+    await wait(900);
+    const slash = $("#tu-slash"); if (slash) slash.remove();
+    hl("#tu-input", false); hl("#tu-footer", false);
+
+    caption(6, "The skill loads: Noah prints the workflow, confines file access to this repository, and enables reviewed writes.");
+    tuMsg("Business Central posture active. Loaded skill business-central-al.", "agent", "noah"); await wait(450);
+    for (const line of [
+      "Defined changes follow spec review → plan review → reviewed implementation → verification.",
+      "The agent can inspect app.json, AL source, symbols and object IDs; scaffold; research Learn; compile; and produce evidence.",
+      "You approve the spec, plan and source changes. Publishing and upgrades need an explicit request."
+    ]){ tuMsg(line, "reason"); await wait(430); }
+    for (const stage of ["1  Discover & clarify","2  Specify & approve","3  Plan & approve","4  Implement in order","5  Build & verify"]){
+      tuMsg("│ " + stage, "result"); await wait(230);
+    }
+    await wait(500);
+
+    caption(7, "VS Code is not running, so Noah asks whether to launch it for this workspace, then performs the review handshake.");
+    tuMsg("VS Code is not running. Launch it with this workspace trusted for the editor session? [Y/n]", "tool", "prompt"); await wait(700);
+    $("#tu-row").classList.add("split");
+    $("#tu-vscode").classList.add("show");
+    await wait(450);
+    await fly($("#tu-window"), $("#tu-vscode"), {label:"handshake", cls:"req", ms:650});
+    $("#tu-glyph").textContent = "✓"; $("#tu-glyph").classList.add("on");
+    $("#tu-editor").textContent = "VS Code connected; editor review is available";
+    $("#tu-vsc-badge").textContent = "✓ Noah Review connected"; $("#tu-vsc-badge").classList.add("on");
+    await wait(700);
+
+    caption(8, "The directory is empty, so Noah offers to provision an extension and initialise Git here.");
+    tuMsg("✓ working directory is empty: ~/projects/reorder-ext", "ok"); await wait(500);
+    tuMsg("Provision an empty Business Central extension and initialize local Git tracking here? [Y/n]", "tool", "prompt"); await wait(850);
+
+    caption(9, "It collects the configuration: a saved environment profile, the target application version, and the object ID range.");
+    tuMsg("Environment profile: Byoma sandbox (25.0.0.0)", "user", "you"); await wait(400);
+    tuMsg("Target application version: 25.0.0.0", "user", "you"); await wait(400);
+    tuMsg("Object ID range: 50100-50149", "user", "you"); await wait(650);
+
+    caption(10, "al_init scaffolds the project, then Noah initialises Git with a baseline commit on main.");
+    tuMsg("→ al_init { idFrom: 50100, idTo: 50149, application: \"25.0.0.0\" }", "tool", "tool call"); await wait(500);
+    tuMsg("created app.json, .vscode/settings.json, .vscode/launch.json, .gitignore, README.md, CHANGELOG.md", "result", "tool result"); await wait(500);
+    tuMsg("✓ Git repository initialized on main with baseline commit (a1b2c3d4)", "ok"); await wait(600);
+    $$("#tu-vscode .vsc-file").forEach(f => f.classList.add("show"));
+    await wait(500);
+
+    caption(11, "Noah downloads the Microsoft and AppSource symbols it needs to compile, from global sources.");
+    tuMsg("→ al_downloadsymbols { globalSourcesOnly: true }", "tool", "tool call"); await wait(500);
+    tuMsg("✓ Business Central symbols ready — 12 packages in .alpackages", "result", "tool result"); await wait(750);
+
+    caption(12, "It offers to compile the starter project to prove the development environment is ready.");
+    tuMsg("Build the extension now with the AL build tools to verify the development environment? [Y/n]", "tool", "prompt"); await wait(600);
+    tuMsg("→ al_build { project: \".\" }", "tool", "tool call"); await wait(500);
+    tuMsg("✓ AL development environment ready — the initial extension compiled successfully", "ok"); await wait(600);
+    $("#tu-ctx").textContent = "ctx 18.2k/256k · cache 12.4k";
+    const plan = items();
+    for (let i = 0; i < 3 && i < plan.length; i++){ plan[i].classList.remove("active"); plan[i].classList.add("done"); plan[i].textContent = "✓ " + TUI_PLAN[i]; }
+    if (plan[3]){ plan[3].classList.add("active"); plan[3].textContent = "● " + TUI_PLAN[3]; }
+    await wait(2800);
+  }
+
+  /* ============================================================
+     INTRO
+     ============================================================ */
+  async function runIntro(){
+    const parts = ["#i-hero","#i-what","#i-why","#i-solves","#i-bc","#i-note"];
+    parts.forEach(s => { const e = $(s); e.classList.add("hidden"); e.classList.remove("visible"); });
+
+    caption(1, "Noah is a minimalist agent harness for building Microsoft Dynamics 365 Business Central extensions in AL.");
+    reveal($("#i-hero")); pulse($("#i-hero")); await wait(1500);
+
+    caption(2, "It is a thin streaming wrapper around an LLM: it assembles context, runs tools, and writes reviewed changes.");
+    reveal($("#i-what")); pulse($("#i-what")); await wait(1900);
+
+    caption(3, "It exists because a chat window alone makes you the integration layer: pasting context in and copying answers out.");
+    reveal($("#i-why")); pulse($("#i-why")); await wait(1900);
+
+    caption(4, "It solves context, tools, memory, review and vendor lock-in, with primitives instead of baked-in features.");
+    reveal($("#i-solves")); pulse($("#i-solves")); await wait(2200);
+
+    caption(5, "And it ships a Business Central extension: 16 AL tools, a spec-first workflow, symbol search and evidence.");
+    reveal($("#i-bc")); pulse($("#i-bc")); await wait(2200);
+
+    caption(6, "Explore the tabs: the manual problem, the loop, prompt growth, GPU generation, the BC build, and the tools.");
+    reveal($("#i-note")); await wait(2600);
+  }
+
+  /* ============================================================
+     SCENE 0 — PLAIN CHAT (THE PROBLEM)
+     ============================================================ */
+  const cCount = { paste:0, copy:0 };
+  function bumpPaste(){ cCount.paste++; $("#c-fr-paste").textContent = cCount.paste; }
+  function bumpCopy(){ cCount.copy++; $("#c-fr-copy").textContent = cCount.copy; }
+  function cMsg(html, cls, who){
+    const d = document.createElement("div");
+    d.className = "msg " + cls;
+    d.innerHTML = (who ? '<span class="who">' + who + '</span>' : "") + html;
+    $("#c-chat").appendChild(d); void d.offsetWidth; d.classList.add("show");
+    const host = d.parentElement;
+    requestAnimationFrame(() => { host.scrollTop = host.scrollHeight; });
+    return d;
+  }
+  function resetChat(){
+    $("#c-chat").innerHTML = ""; $("#c-packets").innerHTML = "";
+    const ed = $("#c-editor"), cn = $("#c-chatnode");
+    ed.classList.add("hidden"); ed.classList.remove("visible");
+    cn.classList.add("hidden"); cn.classList.remove("visible"); cn.classList.remove("forgotten");
+    $("#c-banner").classList.remove("show");
+    $$("#c-files .fitem").forEach(f => f.classList.remove("show","lit"));
+    cCount.paste = 0; cCount.copy = 0;
+    $("#c-fr-paste").textContent = "0"; $("#c-fr-copy").textContent = "0";
+  }
+  async function runChat(){
+    resetChat();
+    const editor = $("#c-editor"), chatnode = $("#c-chatnode");
+
+    caption(1, "Without a harness, an LLM is just a chat box. It starts with no knowledge of your project, files or errors.");
+    reveal(editor); reveal(chatnode);
+    for (const it of $$("#c-files .fitem")){ it.classList.add("show"); await wait(130); }
+    await wait(700);
+
+    caption(2, "You paste the one file you think matters — by hand, every single time.");
+    cMsg("Here is my file:", "user", "you");
+    cMsg('<pre class="paste">codeunit 50100 "Fix"\n{\n    procedure DoIt()\n    var\n        Rec: Record "Item";\n    begin\n        Rec.Get(Rec."No.");\n        Message(\'Done\');\n    end;\n}</pre>', "user");
+    await fly(editor, chatnode, {label:"copy → paste", cls:"tc", ms:700});
+    bumpPaste(); pulse(editor); await wait(800);
+
+    caption(3, "But the model can only see what you pasted. The other four files are invisible to it — it cannot open or discover them.");
+    $$("#c-files .fitem.unseen").forEach(f => f.classList.add("lit"));
+    cMsg("\u26A0 The model can see only src/main.al. It has no idea the other 4 files exist.", "warn");
+    await wait(1400);
+
+    caption(4, "You describe the problem in words, guessing at context the model cannot see.");
+    cMsg("Why does this build fail?", "user", "you"); await wait(1000);
+
+    caption(5, "The model answers as text. It cannot run your build, read your repo, or check anything.");
+    cMsg("The error is probably on line 42: an undeclared variable. Change the declaration to …", "agent", "llm"); await wait(1200);
+
+    caption(6, "You copy its answer out of the chat and back into your editor by hand.");
+    await fly(chatnode, editor, {label:"copy → paste", cls:"res", ms:700});
+    bumpCopy(); pulse(editor); await wait(1000);
+
+    caption(7, "It still needs the compiler error and the helper file. More context, more pasting.");
+    cMsg("Now it says: AL0118 'Rec. No.' is not a valid field.", "user", "you");
+    await fly(editor, chatnode, {label:"copy → paste", cls:"tc", ms:700});
+    bumpPaste(); await wait(1000);
+
+    caption(8, "Every file, every error, every change — pasted in and copied out by you.");
+    for (let i = 0; i < 2; i++){
+      await fly(editor, chatnode, {label:"copy → paste", cls:"tc", ms:420});
+      bumpPaste();
+      await fly(chatnode, editor, {label:"copy → paste", cls:"res", ms:420});
+      bumpCopy();
+    }
+    await wait(750);
+
+    caption(9, "And next session the chat has forgotten everything. You start again from zero.");
+    chatnode.classList.add("forgotten");
+    await wait(1300);
+
+    caption(10, "A harness is different: it discovers and reads the files it needs with tools, so it sees the whole picture — no pasting.");
+    $("#c-banner").classList.add("show");
+    await wait(2800);
+  }
+
+  /* ============================================================
+     PLAYER
+     ============================================================ */
+  const runners = { intro:runIntro, chat:runChat, loop:runLoop, prompt:runPrompt, gpu:runGpu, bc:runBc, tools:runTools, vscode:runVscode, tui:runTui };
+  function updateButton(){
+    const btn = $("#playpause");
+    if (!state.running) btn.textContent = "Replay";
+    else btn.textContent = state.paused ? "Play" : "Pause";
+  }
+  async function play(name){
+    state.abort++;
+    const token = state.abort;
+    state.running = true;
+    state.paused = false;
+    updateButton();
+    try { await runners[name](); }
+    catch(e){ if (e !== ABORT) console.error(e); }
+    finally { if (token === state.abort){ state.running = false; updateButton(); } }
+  }
+  function selectScene(name){
+    state.scene = name;
+    $$(".tab").forEach(t=>t.classList.toggle("active", t.dataset.scene===name));
+    $$(".scene").forEach(s=>s.classList.toggle("active", s.id === "scene-"+name));
+    play(name);
+  }
+
+  /* ============================================================
+     CONTEXT-LAYER INFO MODAL
+     ============================================================ */
+  const CTX_INFO = {
+    system: {
+      kicker: "Layer 1 · system baseline",
+      title: "Minimal system prompt",
+      explain: "The bare-bones baseline that establishes the agent's tool-calling protocol and response style. It is always first and never changes between turns, so providers can cache it. A project SYSTEM.md (or --system-prompt) can append to it, or replace it entirely by starting with #replace.",
+      src: "SystemPrompts.Minimal — src/Noah.Core/Context/SystemPrompts.cs:9",
+      code:
+`You are Noah, a minimalist developer-centric agent harness. You run inside the
+developer's terminal and operating context. You interact with the outside world
+only by emitting structured tool calls.
+
+Persona and communication style:
+- Sarcastic, sharp-witted, and direct.
+- Competent and fiercely helpful under the hood.
+- Zero fluff, zero corporate cheerleading, zero sycophancy.
+
+Operating rules:
+- Call tools with valid JSON arguments matching their schemas.
+- A tool result prefixed with "Error:" means the call failed; adapt or explain.
+- Follow project instructions from AGENTS.md when present.
+- If a needed capability is not available as a tool, say so rather than guessing.`
+    },
+    env: {
+      kicker: "Layer 1b · environment",
+      title: "Environment facts",
+      explain: "A short factual block telling the model where it is running, so it never has to guess a path. It is injected only under the default baseline — if SYSTEM.md or #replace takes ownership of the prompt, this layer is suppressed.",
+      src: "ContextEngine.BuildSystemLayerAsync — src/Noah.Core/Context/ContextEngine.cs:63",
+      code:
+`### Environment
+Working directory: /home/iain/irl-harness
+Relative fs_* paths and the shell tool's cwd resolve against this directory.`
+    },
+    agents: {
+      kicker: "Layer 2 · project instructions",
+      title: "AGENTS.md",
+      explain: "Discovered by walking up from the working directory. It supplies project-specific domain rules and conventions that the model must respect. This is the same file this repository uses to describe its own conventions.",
+      src: "ProjectInstructionLoader.Load — src/Noah.Core/Context/ProjectInstructions.cs:19",
+      code:
+`# AGENTS.md — Noah harness
+
+Noah is a minimalist agent harness built in C#/.NET 10. It follows the philosophy
+in minimal-agent-spec.md: primitives, not features.
+
+## Build & test
+dotnet build Noah.slnx
+dotnet test Noah.slnx
+
+## Conventions
+- .NET 10, nullable enabled, file-scoped namespaces, System.Text.Json only.
+- Providers translate the normalized ChatMessage model; never leak vendor shapes.
+- Tools return ToolResult; never throw to the model.
+- Do not add plan modes or sub-agent orchestrators to the core.`
+    },
+    skills: {
+      kicker: "Layer 3 · capabilities catalog",
+      title: "Skills catalog",
+      explain: "Progressive disclosure: only each skill's name and one-line description sit in the prompt. The full SKILL.md instructions are loaded only when the model calls skill_load, which keeps the context small. Expand a skill below to see what it does and an excerpt of its instructions.",
+      src: "ContextEngine.BuildSystemLayerAsync + SystemPrompts.SkillCatalog — src/Noah.Core/Context/ContextEngine.cs:75",
+      code:
+`### Available skills
+The following capabilities load on demand. Use the skill_load tool with the
+skill name to receive its full instructions before attempting the task:
+- business-central-al: shared BC AL guidance and workflow routing
+- business-central-change: specify, plan, implement, review and verify a defined change
+- business-central-debug: investigate a reported symptom and confirm root cause
+- business-central-inspect: read-only explanation, mapping and review
+- business-central-upgrade: plan and verify an application/platform/dependency upgrade
+- code-review: review a pull-request-sized change against a checklist`,
+      skills: [
+        {
+          name: "business-central-al",
+          when: "Loaded by /BusinessCentral as the shared foundation for all AL work.",
+          desc: "Shared Business Central AL project guidance and routing for change, debugging, review, and upgrade requests.",
+          ex:
+`Use this skill as the shared foundation for Business Central AL work.
+Load exactly one task workflow before acting:
+- business-central-change  → a defined feature, fix or refactor
+- business-central-upgrade → an application/platform/dependency upgrade
+- business-central-debug   → a reported symptom or failure
+- business-central-inspect → read-only explanation or review`
+        },
+        {
+          name: "business-central-change",
+          when: "A defined feature, improvement, refactor or confirmed fix is requested.",
+          desc: "Specify, plan, implement, review, and verify a defined Business Central AL feature, improvement, upgrade, refactor, or confirmed fix.",
+          ex:
+`1. al_workflow initialize — record the request verbatim, ask <=5 scope questions
+2. al_workflow draft      — write Docs/extension-spec.md, confirm with the developer
+3. al_workflow plan       — 1-10 verifiable tasks, every boundary still compiles
+4. implement one task at a time, each source change reviewed via vscode_review`
+        },
+        {
+          name: "business-central-debug",
+          when: "A symptom, error, regression or \"why does this fail?\" is reported.",
+          desc: "Investigate a reported Business Central AL symptom or failure, establish evidence and root cause, and transition a confirmed defect into a reviewed fix when requested.",
+          ex:
+`1. Restate observed vs expected behaviour.
+2. al_project + inspect source, symbols and the execution path.
+3. Reproduce with a test or safe local validation.
+4. Test competing explanations against concrete evidence.
+5. Report conclusion, confidence, missing evidence and the next action.
+Never change code while the cause is uncertain.`
+        },
+        {
+          name: "business-central-inspect",
+          when: "The developer wants explanation, mapping or review with no source change.",
+          desc: "Read-only explanation, mapping, review, and upgrade-readiness assessment of a Business Central AL extension.",
+          ex:
+`Remain read-only:
+- do not initialize al_workflow, create a branch or call al_bug
+- do not modify source, configuration or workflow state
+- call al_project and al_objects to map the extension
+- trace behaviour from its business entry point
+- use Microsoft Learn evidence for version-sensitive claims`
+        },
+        {
+          name: "business-central-upgrade",
+          when: "An actual application, platform, runtime or dependency upgrade is requested.",
+          desc: "Plan, implement, and verify a Business Central AL extension upgrade across application, platform, runtime, or dependency versions.",
+          ex:
+`An upgrade is always a material change.
+1. Record current application/platform/runtime and dependencies.
+2. Establish exact target versions and whether intermediate hops are required.
+3. Inventory external dependencies and target-compatible package versions.
+4. Find obsolete/changed APIs with al_symbolsearch + Learn evidence.
+5. Inspect persisted tables/fields/keys for schema and data risk.`
+        },
+        {
+          name: "code-review",
+          when: "Doing a review pass over a diff or a file set before committing.",
+          desc: "A lightweight, on-demand code review checklist for pull-request-sized changes.",
+          ex:
+`## Checklist
+- Behaviour: does the change match the stated intent? Any dead code?
+- Robustness: error paths, cancellation tokens, input validation.
+- Naming: consistent with the surrounding module conventions?
+- Complexity: duplicated logic better extracted as a primitive?
+- Security: no secrets, no unvalidated shell/URL/data inputs.
+- Tests: are edge cases covered? Is the change observable by a test?`
+        }
+      ]
+    },
+    history: {
+      kicker: "Layer 4 · message history",
+      title: "Conversation history",
+      explain: "The append-only conversation: user messages, assistant turns and tool results, in order. It grows with every turn and is the only layer that changes between calls. When it approaches the context window it is compacted — the oldest messages are summarised (or truncated).",
+      src: "Agent.SendAsync loop + ContextEngine.TryCompactAsync — src/Noah.Core/Agent/Agent.cs:254",
+      code:
+`user      · Fix the AL build error
+assistant · tool_call: al_build { project: "." }
+tool      · 1 error: undeclared variable on line 42
+assistant · Found it — fixing line 42.
+
+# next call re-sends all of the above, then appends the new message:
+user      · Now add a test for it`
+    },
+    tokenize: {
+      kicker: "Forward pass · step 1",
+      title: "Tokenize",
+      explain: "The model cannot read text — it reads numbers. Tokenizing chops the prompt into small chunks called tokens (roughly 3–4 characters each) and replaces each chunk with its ID from a fixed vocabulary. A short sentence might become five to ten tokens.",
+      src: "Runs inside the model on the provider's GPU — the harness only sends text.",
+      code:
+`"Fix the AL build"          (text in)
+        │  tokenizer
+        ▼
+[ 4521, 279, 1256, 1713 ]    (token IDs out)`
+    },
+    embed: {
+      kicker: "Forward pass · step 2",
+      title: "Embed",
+      explain: "Each token ID is swapped for a long list of numbers called a vector (its embedding). The vector encodes what the token means, so words used in similar ways end up with similar numbers. From here on, everything the model does is vectors and maths.",
+      src: "Runs inside the model on the provider's GPU.",
+      code:
+`token ID 4521
+        │  embedding lookup
+        ▼
+[ 0.12, -0.44, 0.07, 0.91, ... ]   (a vector of d_model numbers)`
+    },
+    transformer: {
+      kicker: "Forward pass · step 3",
+      title: "Transformer ×L",
+      explain: "This is the thinking part: a stack of identical layers (L of them — often dozens). In each layer every token looks at the other tokens to gather context (attention), then each token is transformed on its own by a small neural network. Stacking layers builds up meaning from grammar to concepts.",
+      src: "Runs inside the model on the provider's GPU.",
+      code:
+`token vectors
+     │   ┌───────────────────────────┐
+     ├──▶│ layer 1 : attention + MLP │
+     │   ├───────────────────────────┤
+     ├──▶│ layer 2 : attention + MLP │
+     │   │            ...            │   × L layers
+     │   ├───────────────────────────┤
+     └──▶│ layer L : attention + MLP │
+         └───────────────────────────┘`
+    },
+    logits: {
+      kicker: "Forward pass · step 4",
+      title: "Logits",
+      explain: "The final layer turns the last token's vector into one raw score for every word in the vocabulary. Those scores are called logits. The highest score is the model's favourite next token — but nothing has been chosen yet.",
+      src: "Runs inside the model on the provider's GPU.",
+      code:
+`last token vector
+        │  final linear layer
+        ▼
+{ "the": 8.2, "fix": 6.9, "is": 5.1, "a": 4.4, ... }
+   one score per vocabulary entry`
+    },
+    sample: {
+      kicker: "Forward pass · step 5",
+      title: "Sample",
+      explain: "The sampler turns the logits into probabilities and picks one token. Temperature controls randomness — low is focused and repeatable, high is more creative. top-p keeps only the most likely candidates. The chosen token is appended to the sequence, then the whole loop runs again for the next token.",
+      src: "Runs inside the model on the provider's GPU.",
+      code:
+`logits + temperature / top-p
+        │  pick one
+        ▼
+"the"   → appended to the sequence
+        → feed the new token back in for the next forward pass`
+    },
+    "tui-header": {
+      kicker: "TUI · header (fixed top)",
+      title: "Header",
+      explain: "The fixed top region, redrawn every frame. It shows the build identity and active model, provider-reported context and cache usage, the working directory, the approval mode, and the live VS Code review-connection state. A pixel mascot animates while a request is running.",
+      src: "TuiApp.BuildBannerLines — src/Noah.Cli/TuiApp.cs:889",
+      code:
+`▄▄▄▄▄  Noah b3f9c1a2  claude-sonnet-4     ctx 12.4k/256k · cache 9.8k
+       ~/projects/reorder-ext             Approvals: on (sandbox)
+       ✓ VS Code connected; editor review is available
+─────────────────────────────────────────────────────────────`
+    },
+    "tui-transcript": {
+      kicker: "TUI · transcript (scrollable)",
+      title: "Streaming transcript",
+      explain: "The scrollable conversation area. It streams model output token-by-token and shows your input, reasoning deltas, tool calls and their results, compaction notices and errors. It keeps up to 50,000 rows in its own viewport; Page Up/Down scrolls without moving live output. While fenced code streams, a Matrix-style rain panel appears.",
+      src: "TuiApp.OnEvent / DeltaRenderer — src/Noah.Cli/TuiApp.cs:373",
+      code:
+`› Why does the AL build fail?
+  reasoning: checking the compiler output…
+  → al_build { project: "." }
+  result: 1 error: undeclared variable on line 42
+  noah: Line 42 uses a variable that is never declared.`
+    },
+    "tui-plan": {
+      kicker: "TUI · plan pane",
+      title: "Plan pane (Business Central)",
+      explain: "A persistent right-hand pane shown during the Business Central workflow. It tracks the implementation plan task by task, marking each complete or in-progress as al_workflow advances, without repeating the whole list in the transcript.",
+      src: "TuiApp workflow pane — src/Noah.Cli/TuiApp.cs:639",
+      code:
+`Plan
+  ✓ Load skill
+  ✓ Bootstrap project
+  ✓ Download symbols
+  ● Ask scope questions
+  ○ Spec + plan
+  ○ Scaffold objects
+  ○ Build`
+    },
+    "tui-input": {
+      kicker: "TUI · input area",
+      title: "Input area (pinned bottom)",
+      explain: "A multi-line text-entry area pinned to the bottom of the screen, with the placeholder 'Ask a question or describe a change…'. Typing / opens an inline slash-command menu with autocomplete. Enter sends, Ctrl+J inserts a newline, Esc cancels a running request.",
+      src: "BottomInputArea — src/Noah.Cli/BottomInputArea.cs:22",
+      code:
+`› Ask a question or describe a change…▍
+
+slash commands:
+  /BusinessCentral  /status  /model  /tree  /branch
+  /skills  /tools  /export  /yolo  /new  /exit`
+    },
+    "tui-footer": {
+      kicker: "TUI · footer / status",
+      title: "Footer and status row",
+      explain: "The persistent footer shows the live activity on the left and the shortcut keys on the right. The status reflects the run state: Ready, WORKING with an activity pulse, Waiting for approval, Cancelled, or Failed. Shortcut hints change while a request is running (Esc cancel).",
+      src: "TuiApp.StatusText / HintKeys — src/Noah.Cli/TuiApp.cs:324",
+      code:
+`● Ready (make it count)          F5 sync · / commands · Enter send · Ctrl+J newline
+◓ WORKING [██░░░░░░░░] al_build  Esc cancel
+◔ Waiting for approval`
+    }
+  };
+  function showModal(info){
+    if (!info) return;
+    $("#modal-kicker").textContent = info.kicker;
+    $("#modal-title").textContent = info.title;
+    $("#modal-explain").textContent = info.explain;
+    $("#modal-src").textContent = info.src || "";
+    $("#modal-code").textContent = info.code || "";
+    $("#modal-src").style.display = info.src ? "" : "none";
+    $("#modal-code").style.display = info.code ? "" : "none";
+    const extra = $("#modal-extra");
+    extra.innerHTML = "";
+    if (info.skills){
+      const hint = document.createElement("div");
+      hint.className = "modal-hint";
+      hint.textContent = "Bundled skills — click to expand";
+      extra.appendChild(hint);
+      for (const s of info.skills){
+        const acc = document.createElement("div");
+        acc.className = "skill-acc";
+        acc.innerHTML =
+          '<button class="skill-head" type="button">' +
+            '<span class="chev">\u25B6</span>' +
+            '<span class="skill-name"></span>' +
+          '</button>' +
+          '<div class="skill-body"><div class="skill-inner">' +
+            '<p class="skill-desc"></p>' +
+            '<div class="skill-when"><b>Loads when:</b> <span></span></div>' +
+            '<pre class="skill-ex"></pre>' +
+          '</div></div>';
+        acc.querySelector(".skill-name").textContent = s.name;
+        acc.querySelector(".skill-desc").textContent = s.desc;
+        acc.querySelector(".skill-when span").textContent = s.when;
+        acc.querySelector(".skill-ex").textContent = s.ex;
+        acc.querySelector(".skill-head").addEventListener("click", () => acc.classList.toggle("open"));
+        extra.appendChild(acc);
+      }
+    }
+    $("#modal").classList.add("open");
+    $("#modal").setAttribute("aria-hidden","false");
+  }
+  function openModal(key){ showModal(CTX_INFO[key]); }
+  function closeModal(){
+    $("#modal").classList.remove("open");
+    $("#modal").setAttribute("aria-hidden","true");
+  }
+  document.addEventListener("click", e => {
+    const trigger = e.target.closest("[data-info]");
+    if (trigger) openModal(trigger.dataset.info);
+  });
+  $("#modal-close").addEventListener("click", closeModal);
+  $("#modal").addEventListener("click", e => { if (e.target.id === "modal") closeModal(); });
+
+  /* ---------------- controls ---------------- */
+  $("#playpause").addEventListener("click", () => {
+    if (!state.running){ play(state.scene); return; }
+    state.paused = !state.paused;
+    updateButton();
+  });
+  $("#restart").addEventListener("click", () => play(state.scene));
+  $$(".tab").forEach(t => t.addEventListener("click", () => selectScene(t.dataset.scene)));
+  $("#speed").addEventListener("input", e => {
+    state.speed = parseFloat(e.target.value);
+    $("#speedval").textContent = state.speed.toFixed(1) + "×";
+  });
+  document.addEventListener("keydown", e => {
+    if (e.target.tagName === "INPUT") return;
+    if ($("#modal").classList.contains("open")){ if (e.key === "Escape") closeModal(); return; }
+    if (e.code === "Space"){ e.preventDefault(); $("#playpause").click(); }
+    else if (e.key === "r" || e.key === "R"){ $("#restart").click(); }
+    else if (e.key === "0"){ selectScene("chat"); }
+    else if (e.key === "1"){ selectScene("loop"); }
+    else if (e.key === "2"){ selectScene("prompt"); }
+    else if (e.key === "3"){ selectScene("gpu"); }
+    else if (e.key === "4"){ selectScene("bc"); }
+    else if (e.key === "5"){ selectScene("tools"); }
+    else if (e.key === "6"){ selectScene("vscode"); }
+    else if (e.key === "7"){ selectScene("tui"); }
+  });
+
+  /* hash select / deep-link: #intro #chat #loop #prompt #gpu #bc #tools */
+  const scenes = ["intro","chat","loop","prompt","gpu","bc","tools","vscode","tui"];
+  const fromHash = () => scenes.includes(location.hash.slice(1)) ? location.hash.slice(1) : "intro";
+  window.addEventListener("hashchange", () => selectScene(fromHash()));
+  selectScene(fromHash());
+})();
+</script>
+</body>
+</html>
